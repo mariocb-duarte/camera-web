@@ -122,7 +122,7 @@ video.mirror{transform:scaleX(-1)}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><circle cx="9.5" cy="10.5" r=".6" fill="currentColor"/><circle cx="14.5" cy="10.5" r=".6" fill="currentColor"/><path d="M9.5 15c1.4 1 3.6 1 5 0"/></svg><span id="faceLabel">Rosto</span>
         </button>
         <button class="chip" id="btnAuto" aria-pressed="false" title="Disparo automático ao detectar rosto">
-          <span class="dot"></span>Auto
+          <span class="dot"></span><span id="autoLabel">Auto</span>
         </button>
       </div>
       <div class="tgroup">
@@ -299,32 +299,39 @@ video.mirror{transform:scaleX(-1)}
 
   function drawFaces(dets) {
     sizeFaceCanvas();
+    updateTracks(dets);
     const cw = faceCanvas.clientWidth, ch = faceCanvas.clientHeight, vw = video.videoWidth, vh = video.videoHeight;
     fctx.clearRect(0, 0, cw, ch);
     // Mesmo enquadramento do vídeo (object-fit: cover) e espelhamento da câmera frontal
     const s = Math.max(cw / vw, ch / vh), ox = (cw - vw * s) / 2, oy = (ch - vh * s) / 2, mirror = state.facing === 'user';
-    fctx.strokeStyle = ACCENT; fctx.lineWidth = 2.5; fctx.lineCap = 'round';
-    fctx.font = '500 11px "IBM Plex Mono", ui-monospace, monospace'; fctx.textBaseline = 'top';
+    fctx.lineCap = 'round'; fctx.font = '500 11px "IBM Plex Mono", ui-monospace, monospace'; fctx.textBaseline = 'top';
     for (const d of dets) {
       const b = d.boundingBox; const w = b.width * s, h = b.height * s, y = b.originY * s + oy;
       let x = b.originX * s + ox; if (mirror) x = cw - x - w;
+      let color = ACCENT, label = Math.round((d.categories?.[0]?.score ?? 0) * 100) + '%';
+      if (auto.on && d._t) {
+        const st = d._t.status;
+        if (st === 'known' || st === 'done') { color = GREEN; label = '✓ já fotografado'; }
+        else if (st === 'pending') { color = '#eef1ee'; label = 'identificando…'; }
+        else if (st === 'shooting') { color = RED; label = 'fotografando'; }
+        else { label = 'nova pessoa'; }
+      }
       const k = Math.min(w, h) * 0.22; // cantoneiras
+      fctx.strokeStyle = color; fctx.lineWidth = 2.5;
       fctx.beginPath();
       fctx.moveTo(x, y + k); fctx.lineTo(x, y); fctx.lineTo(x + k, y);
       fctx.moveTo(x + w - k, y); fctx.lineTo(x + w, y); fctx.lineTo(x + w, y + k);
       fctx.moveTo(x + w, y + h - k); fctx.lineTo(x + w, y + h); fctx.lineTo(x + w - k, y + h);
       fctx.moveTo(x + k, y + h); fctx.lineTo(x, y + h); fctx.lineTo(x, y + h - k);
       fctx.stroke();
-      fctx.strokeStyle = 'rgba(255,204,51,.35)'; fctx.lineWidth = 1; fctx.strokeRect(x, y, w, h);
-      fctx.strokeStyle = ACCENT; fctx.lineWidth = 2.5;
-      const score = Math.round((d.categories?.[0]?.score ?? 0) * 100) + '%';
-      const tw = fctx.measureText(score).width + 8;
-      fctx.fillStyle = ACCENT; fctx.fillRect(x, y - 18, tw, 16);
-      fctx.fillStyle = '#0b0d0c'; fctx.fillText(score, x + 4, y - 16);
+      fctx.globalAlpha = .35; fctx.lineWidth = 1; fctx.strokeRect(x, y, w, h); fctx.globalAlpha = 1;
+      const tw = fctx.measureText(label).width + 8;
+      fctx.fillStyle = color; fctx.fillRect(x, y - 18, tw, 16);
+      fctx.fillStyle = '#0b0d0c'; fctx.fillText(label, x + 4, y - 16);
     }
     if (dets.length !== face.n) { face.n = dets.length; setFaceUI(); }
     face.last = dets;
-    autoTick(dets);
+    autoTick();
   }
 
   function setFaceUI(loading) {
@@ -344,40 +351,110 @@ video.mirror{transform:scaleX(-1)}
     if (auto.on) setAuto(false);
   }
 
-  // ---------- Disparo automático em sequência ----------
+  // ---------- Disparo automático: uma sequência por pessoa nova ----------
   const BURST = 5;          // fotos por pessoa
   const BURST_GAP = 180;    // ms entre fotos da sequência
-  const MAX_PEOPLE = 4;     // limite de pessoas por disparo
-  const STABLE_MS = 700;    // rosto precisa ficar na tela por esse tempo
-  const REARM_EMPTY = 1200; // rearma quando a cena fica vazia por esse tempo
-  const REARM_MAX = 10000;  // ou depois desse tempo, mesmo com gente na tela
-  const auto = { on: false, armed: true, seenSince: 0, emptySince: 0, doneAt: 0, warnedFocus: false };
+  const STABLE_MS = 700;    // rosto precisa ficar na tela por esse tempo antes de identificar
+  const MATCH_DIST = 0.55;  // distância máxima para considerar "mesma pessoa" (menor = mais rígido)
+  const GREEN = '#3ddc84', RED = '#ff5a4e';
+  const FA = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13';
+  const auto = { on: false, warnedFocus: false, warnedRecog: false };
+  const tracks = []; let nextTrack = 1;     // rostos acompanhados quadro a quadro
+  const known = [];                         // assinaturas de quem já foi fotografado
+  let faceapi = null, faLoading = null, describing = false;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-  function setAutoUI(mode) {
+  // Reconhecimento (face-api): gera uma assinatura de 128 números por rosto
+  async function loadFaceApi() {
+    if (faceapi) return faceapi;
+    faLoading ??= (async () => {
+      const fa = await import(FA + '/dist/face-api.esm.js');
+      await fa.tf.ready();
+      await Promise.all([
+        fa.nets.tinyFaceDetector.loadFromUri(FA + '/model'),
+        fa.nets.faceLandmark68Net.loadFromUri(FA + '/model'),
+        fa.nets.faceRecognitionNet.loadFromUri(FA + '/model'),
+      ]);
+      return fa;
+    })();
+    try { faceapi = await faLoading; } catch (e) { faLoading = null; throw e; }
+    return faceapi;
+  }
+
+  async function describe(box) {
+    const fa = await loadFaceApi();
+    const vw = video.videoWidth, vh = video.videoHeight, m = 0.35;
+    const x = Math.max(0, box.originX - box.width * m), y = Math.max(0, box.originY - box.height * m);
+    const w = Math.min(vw - x, box.width * (1 + 2 * m)), h = Math.min(vh - y, box.height * (1 + 2 * m));
+    if (w < 8 || h < 8) return null;
+    const sc = 320 / Math.max(w, h);
+    const c = document.createElement('canvas'); c.width = Math.round(w * sc); c.height = Math.round(h * sc);
+    c.getContext('2d').drawImage(video, x, y, w, h, 0, 0, c.width, c.height);
+    const r = await fa.detectSingleFace(c, new fa.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.3 })).withFaceLandmarks().withFaceDescriptor();
+    return r?.descriptor || null;
+  }
+  const isKnown = desc => !!faceapi && known.some(k => faceapi.euclideanDistance(k, desc) < MATCH_DIST);
+
+  // Acompanha cada rosto entre quadros (sobreposição das caixas)
+  const iou = (a, b) => {
+    const x1 = Math.max(a.originX, b.originX), y1 = Math.max(a.originY, b.originY);
+    const x2 = Math.min(a.originX + a.width, b.originX + b.width), y2 = Math.min(a.originY + a.height, b.originY + b.height);
+    const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+    return inter / (a.width * a.height + b.width * b.height - inter || 1);
+  };
+  function updateTracks(dets) {
+    const now = performance.now(), used = new Set();
+    for (const d of dets) {
+      let best = null, bv = 0;
+      for (const t of tracks) { if (used.has(t)) continue; const v = iou(t.box, d.boundingBox); if (v > bv) { bv = v; best = t; } }
+      if (!best || bv < 0.25) { best = { id: nextTrack++, firstSeen: now, status: 'pending', tries: 0 }; tracks.push(best); }
+      best.box = d.boundingBox; best.det = d; best.lastSeen = now; used.add(best); d._t = best;
+    }
+    for (let i = tracks.length - 1; i >= 0; i--) if (now - tracks[i].lastSeen > 1000 && tracks[i].status !== 'shooting') tracks.splice(i, 1);
+  }
+
+  function autoTick() {
+    if (!auto.on) return;
+    const now = performance.now();
+    if (!describing) {
+      const t = tracks.find(t => t.status === 'pending' && now - t.firstSeen > STABLE_MS && now - t.lastSeen < 200);
+      if (t) identify(t);
+    }
+    if (!state.busy) {
+      const fresh = tracks.filter(t => t.status === 'new' && now - t.lastSeen < 300);
+      if (fresh.length) burst(fresh);
+    }
+  }
+
+  async function identify(t) {
+    describing = true;
+    try {
+      const d = await describe(t.box);
+      if (d) { t.desc = d; t.status = isKnown(d) ? 'known' : 'new'; }
+      else if (++t.tries >= 3) t.status = 'new'; // não conseguiu ler o rosto: fotografa mesmo assim
+    } catch {
+      t.status = 'new';
+      if (!auto.warnedRecog) { auto.warnedRecog = true; toast('Reconhecimento indisponível: só evita repetir enquanto a pessoa fica na tela'); }
+    } finally { describing = false; }
+  }
+
+  function setAutoUI() {
     const b = $('btnAuto');
     b.setAttribute('aria-pressed', String(auto.on));
-    b.dataset.auto = !auto.on ? '' : mode || (auto.armed ? 'ready' : 'wait');
+    b.dataset.auto = !auto.on ? '' : state.busy ? 'firing' : 'ready';
+    $('autoLabel').textContent = auto.on && known.length ? `Auto · ${known.length}` : 'Auto';
   }
   function setAuto(on) {
-    auto.on = on; auto.armed = true; auto.seenSince = 0; auto.emptySince = 0;
-    if (on && !face.on) { enableFaces(); state.face = true; savePrefs(); }
+    auto.on = on;
+    if (on) {
+      known.length = 0; tracks.length = 0; // nova sessão: ninguém fotografado ainda
+      if (!face.on) { enableFaces(); state.face = true; savePrefs(); }
+      loadFaceApi().catch(() => {});
+    }
     setAutoUI();
-    toast(on ? 'Auto ligado: dispara ao detectar rosto' : 'Auto desligado');
+    toast(on ? 'Auto ligado: fotografa cada pessoa nova uma vez' : 'Auto desligado');
   }
   $('btnAuto').onclick = () => setAuto(!auto.on);
-
-  function autoTick(dets) {
-    if (!auto.on || state.busy) return;
-    const now = performance.now();
-    if (dets.length) { auto.emptySince = 0; auto.seenSince ||= now; }
-    else { auto.seenSince = 0; auto.emptySince ||= now; }
-    if (!auto.armed) {
-      if ((auto.emptySince && now - auto.emptySince > REARM_EMPTY) || now - auto.doneAt > REARM_MAX) { auto.armed = true; setAutoUI(); }
-      return;
-    }
-    if (auto.seenSince && now - auto.seenSince > STABLE_MS) burst();
-  }
 
   // Foco no centro do rosto (pointsOfInterest: suportado em parte dos Androids)
   async function focusOn(det) {
@@ -398,40 +475,39 @@ video.mirror{transform:scaleX(-1)}
     if (caps.focusMode?.includes('continuous')) { try { await state.track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch {} }
   }
 
-  async function burst() {
+  async function burst(targets) {
     if (state.busy || !state.track) return;
-    state.busy = true; auto.armed = false; $('shutter').disabled = true; setAutoUI('firing');
-    const burstId = Date.now(); let saved = 0, focusedAny = false;
-    const people = Math.min(MAX_PEOPLE, Math.max(1, face.last?.length || 0));
+    state.busy = true; $('shutter').disabled = true; setAutoUI();
+    const burstId = Date.now(); let saved = 0, people = 0, focusedAny = false;
     try {
-      for (let p = 0; p < people; p++) {
-        // Ordena da esquerda para a direita na tela e pega a pessoa da vez
-        const mirror = state.facing === 'user';
-        const dets = [...(face.last || [])].sort((a, b) => (a.boundingBox.originX - b.boundingBox.originX) * (mirror ? -1 : 1));
-        const target = dets[p] || dets[dets.length - 1];
-        if (await focusOn(target)) focusedAny = true;
+      for (const t of targets) {
+        if (t.desc && isKnown(t.desc)) { t.status = 'known'; continue; } // mesma pessoa em outro rastro
+        t.status = 'shooting'; people++;
+        if (await focusOn(t.det)) focusedAny = true;
         for (let i = 0; i < BURST; i++) {
           flash();
           const blob = await frameBlob();
           const st = state.track.getSettings();
           await putPhoto({ id: burstId + saved, blob, type: blob.type, width: st.width, height: st.height, facing: state.facing, zoom: state.zoom,
-            burst: burstId, person: p + 1, people, shot: i + 1, shots: BURST });
+            burst: burstId, person: known.length + 1, shot: i + 1, shots: BURST });
           saved++;
           if (i < BURST - 1) await sleep(BURST_GAP);
         }
+        if (t.desc) known.push(t.desc);
+        t.status = 'done'; setAutoUI();
       }
-      refreshThumb();
-      let msg = `${saved} fotos · ${people} pessoa${people > 1 ? 's' : ''}`;
-      if (!focusedAny && !auto.warnedFocus) { msg += ' · sem foco por ponto neste aparelho'; auto.warnedFocus = true; }
-      toast(msg);
-    } catch (e) { toast('Falha na sequência: ' + (e.message || e.name)); }
+      if (saved) {
+        refreshThumb();
+        let msg = `${saved} fotos · ${people} pessoa${people > 1 ? 's' : ''} nova${people > 1 ? 's' : ''}`;
+        if (!focusedAny && !auto.warnedFocus) { msg += ' · sem foco por ponto neste aparelho'; auto.warnedFocus = true; }
+        toast(msg);
+      }
+    } catch (e) { toast('Falha na sequência: ' + (e.message || e.name)); targets.forEach(t => { if (t.status === 'shooting') t.status = 'done'; }); }
     finally {
       await resetFocus();
-      state.busy = false; $('shutter').disabled = false;
-      auto.doneAt = performance.now(); auto.seenSince = 0; auto.emptySince = 0; setAutoUI();
+      state.busy = false; $('shutter').disabled = false; setAutoUI();
     }
   }
-  $('btnFace').onclick = () => { face.on ? disableFaces() : enableFaces(); state.face = face.on; savePrefs(); };
 
   // ---------- Captura ----------
   async function capture() {
@@ -500,7 +576,7 @@ video.mirror{transform:scaleX(-1)}
       const b = document.createElement('button'); b.setAttribute('aria-label', 'Abrir foto de ' + fmt(p.id));
       const i = document.createElement('img'); i.loading = 'lazy'; i.alt = ''; i.src = objURL(p.blob);
       b.appendChild(i);
-      if (p.burst) { const s = document.createElement('span'); s.className = 'badge'; s.textContent = (p.people > 1 ? `P${p.person} ` : '') + `${p.shot}/${p.shots}`; b.appendChild(s); }
+      if (p.burst) { const s = document.createElement('span'); s.className = 'badge'; s.textContent = `P${p.person} ${p.shot}/${p.shots}`; b.appendChild(s); }
       b.onclick = () => openViewer(p); g.appendChild(b);
     });
     $('gallery').hidden = false;
@@ -510,7 +586,7 @@ video.mirror{transform:scaleX(-1)}
     $('viewerImg').src = objURL(p.blob);
     $('viewerTitle').textContent = fmt(p.id);
     $('viewerMeta').textContent = [p.width && p.height ? `${p.width}×${p.height}` : '', (p.blob.size / 1024 / 1024).toFixed(1) + ' MB', p.facing === 'user' ? 'frontal' : 'traseira',
-      p.burst ? `sequência ${p.shot}/${p.shots}` + (p.people > 1 ? ` · pessoa ${p.person}/${p.people}` : '') : ''].filter(Boolean).join(' · ');
+      p.burst ? `pessoa ${p.person} · sequência ${p.shot}/${p.shots}` : ''].filter(Boolean).join(' · ');
     $('viewer').hidden = false;
     $('btnShare').hidden = !navigator.canShare;
   }
