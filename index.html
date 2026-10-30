@@ -49,6 +49,16 @@ video.mirror{transform:scaleX(-1)}
 .chip[data-auto="wait"] .dot{background:var(--muted);opacity:1}
 .chip[data-auto="firing"] .dot{background:var(--danger);opacity:1}
 #gallerygrid button{position:relative}
+#gallerygrid{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+#gallerygrid img{transition:transform .12s,opacity .12s}
+.sel-check{position:absolute;top:6px;left:6px;width:24px;height:24px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.35);display:none;place-items:center}
+.sel-check svg{width:14px;height:14px;opacity:0}
+#gallery.selecting .sel-check{display:grid}
+#gallerygrid button[aria-pressed="true"] .sel-check{background:var(--accent);border-color:var(--accent);color:#0b0d0c}
+#gallerygrid button[aria-pressed="true"] .sel-check svg{opacity:1}
+#gallerygrid button[aria-pressed="true"] img{transform:scale(.9);opacity:.7}
+.hactions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.btn:disabled{opacity:.4}
 .badge{position:absolute;right:4px;bottom:4px;padding:2px 5px;border-radius:5px;background:rgba(0,0,0,.65);color:var(--fg);font:500 10px/1.2 var(--mono);font-variant-numeric:tabular-nums}
 .chip{display:flex;align-items:center;gap:6px;height:36px;padding:0 12px;border-radius:18px;background:var(--panel);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
   font:500 12px/1 var(--mono);letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
@@ -87,7 +97,7 @@ video.mirror{transform:scaleX(-1)}
 .empty{grid-column:1/-1;padding:48px 24px;text-align:center;color:var(--muted);font-size:15px;line-height:1.5}
 #viewer .imgwrap{flex:1;min-height:0;display:grid;place-items:center;background:#000}
 #viewer img{max-width:100%;max-height:100%;object-fit:contain}
-#viewer footer{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;
+.sheet footer{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;
   padding:12px max(16px,env(safe-area-inset-right,0px)) calc(env(safe-area-inset-bottom,0px) + 14px) max(16px,env(safe-area-inset-left,0px))}
 
 /* Erro / permissão */
@@ -155,10 +165,12 @@ video.mirror{transform:scaleX(-1)}
 
 <section class="sheet" id="gallery" hidden>
   <header>
-    <div><h2>Galeria</h2><div class="meta" id="galleryMeta"></div></div>
-    <button class="btn" id="btnCloseGallery">Fechar</button>
+    <div><h2 id="galleryTitle">Galeria</h2><div class="meta" id="galleryMeta"></div></div>
+    <div class="hactions" id="galNormal"><button class="btn" id="btnSelect">Selecionar</button><button class="btn" id="btnCloseGallery">Fechar</button></div>
+    <div class="hactions" id="galSelect" hidden><button class="btn" id="btnSelAll">Todas</button><button class="btn" id="btnSelCancel">Cancelar</button></div>
   </header>
   <div id="gallerygrid"></div>
+  <footer id="selBar" hidden><button class="btn danger" id="btnDelSel" disabled>Excluir</button></footer>
 </section>
 
 <section class="sheet" id="viewer" hidden>
@@ -603,13 +615,22 @@ video.mirror{transform:scaleX(-1)}
     const list = await allPhotos();
     const g = $('gallerygrid'); g.innerHTML = '';
     $('galleryMeta').textContent = list.length ? `${list.length} foto${list.length > 1 ? 's' : ''} neste aparelho` : '';
+    sel.all = list.map(p => p.id); $('btnSelect').hidden = !list.length;
     if (!list.length) g.innerHTML = '<div class="empty">Nenhuma foto ainda. Toque no botão branco para tirar a primeira.</div>';
     list.forEach(p => {
       const b = document.createElement('button'); b.setAttribute('aria-label', 'Abrir foto de ' + fmt(p.id));
       const i = document.createElement('img'); i.loading = 'lazy'; i.alt = ''; i.src = objURL(p.blob);
       b.appendChild(i);
       if (p.burst) { const s = document.createElement('span'); s.className = 'badge'; s.textContent = `P${p.person}${p.take > 1 ? '·' + p.take : ''} ${p.shot}/${p.shots}`; b.appendChild(s); }
-      b.onclick = () => openViewer(p); g.appendChild(b);
+      const ck = document.createElement('span'); ck.className = 'sel-check';
+      ck.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5 9-10"/></svg>';
+      b.appendChild(ck); b.dataset.id = p.id; b.setAttribute('aria-pressed', String(sel.ids.has(p.id)));
+      // Toque longo entra no modo de seleção
+      let lp = 0, longFired = false;
+      b.addEventListener('pointerdown', () => { longFired = false; lp = setTimeout(() => { longFired = true; if (!sel.on) setSelecting(true); toggleSel(p.id, b); navigator.vibrate?.(15); }, 450); });
+      ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => b.addEventListener(ev, () => clearTimeout(lp)));
+      b.onclick = () => { if (longFired) return; sel.on ? toggleSel(p.id, b) : openViewer(p); };
+      g.appendChild(b);
     });
     $('gallery').hidden = false;
   }
@@ -642,7 +663,50 @@ video.mirror{transform:scaleX(-1)}
   $('shutter').onclick = capture;
   $('flip').onclick = () => { state.facing = state.facing === 'user' ? 'environment' : 'user'; savePrefs(); startCamera(); };
   $('thumb').onclick = openGallery;
-  $('btnCloseGallery').onclick = () => { $('gallery').hidden = true; revokeAll(); };
+  $('btnCloseGallery').onclick = () => { setSelecting(false); $('gallery').hidden = true; revokeAll(); };
+
+  // ---------- Seleção e exclusão em massa ----------
+  const sel = { on: false, ids: new Set(), all: [], armed: false, t: 0 };
+  const gridButtons = () => [...$('gallerygrid').querySelectorAll('button[data-id]')];
+  function disarmDel() { sel.armed = false; clearTimeout(sel.t); }
+  function setSelecting(on) {
+    sel.on = on; sel.ids.clear(); disarmDel();
+    $('gallery').classList.toggle('selecting', on);
+    $('galNormal').hidden = on; $('galSelect').hidden = !on; $('selBar').hidden = !on;
+    gridButtons().forEach(b => b.setAttribute('aria-pressed', 'false'));
+    updateSelUI();
+  }
+  function toggleSel(id, b) {
+    sel.ids.has(id) ? sel.ids.delete(id) : sel.ids.add(id);
+    b.setAttribute('aria-pressed', String(sel.ids.has(id)));
+    disarmDel(); updateSelUI();
+  }
+  function updateSelUI() {
+    const n = sel.ids.size, all = n > 0 && n === sel.all.length;
+    $('galleryTitle').textContent = sel.on ? (n ? `${n} selecionada${n > 1 ? 's' : ''}` : 'Selecione fotos') : 'Galeria';
+    $('btnSelAll').textContent = all ? 'Nenhuma' : 'Todas';
+    $('btnDelSel').disabled = !n;
+    $('btnDelSel').textContent = sel.armed ? `Confirmar: excluir ${n}` : n ? `Excluir ${n} foto${n > 1 ? 's' : ''}` : 'Excluir';
+  }
+  $('btnSelect').onclick = () => setSelecting(true);
+  $('btnSelCancel').onclick = () => setSelecting(false);
+  $('btnSelAll').onclick = () => {
+    const all = sel.ids.size === sel.all.length;
+    sel.ids = new Set(all ? [] : sel.all);
+    gridButtons().forEach(b => b.setAttribute('aria-pressed', String(!all)));
+    disarmDel(); updateSelUI();
+  };
+  $('btnDelSel').onclick = async () => {
+    const n = sel.ids.size; if (!n) return;
+    if (!sel.armed) { sel.armed = true; updateSelUI(); sel.t = setTimeout(() => { sel.armed = false; updateSelUI(); }, 3000); return; }
+    disarmDel();
+    const ids = [...sel.ids];
+    try {
+      await tx('readwrite', s => { ids.forEach(id => s.delete(id)); return {}; });
+      toast(`${n} foto${n > 1 ? 's' : ''} excluída${n > 1 ? 's' : ''}`);
+    } catch (e) { toast('Não foi possível excluir: ' + (e.message || e.name)); }
+    setSelecting(false); openGallery(); refreshThumb();
+  };
   $('btnCloseViewer').onclick = () => { $('viewer').hidden = true; };
   $('btnGrid').onclick = () => { state.grid = !state.grid; applyUI(); savePrefs(); };
   $('btnTimer').onclick = () => { state.timer = TIMERS[(TIMERS.indexOf(state.timer) + 1) % TIMERS.length]; applyUI(); savePrefs(); };

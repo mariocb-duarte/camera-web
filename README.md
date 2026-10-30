@@ -11,7 +11,7 @@ App de câmera que roda no navegador do celular. Um único `index.html`, sem bui
 - Detecção de rosto em tempo real (MediaPipe, processada no próprio aparelho)
 - Modo Auto: fotografa cada pessoa nova uma única vez (5 fotos em sequência, com foco no rosto quando o aparelho suporta). Usa reconhecimento facial no aparelho para não repetir quem já foi fotografado; se todos já foram fotografados e alguém muda de posição, refaz a sequência dessa pessoa
 - Resolução máxima ou HD
-- Galeria local com compartilhar, baixar e excluir
+- Galeria local com compartilhar, baixar e excluir, incluindo seleção múltipla e exclusão em massa
 
 ## Requisitos
 A câmera só é liberada em HTTPS (ou localhost). No celular, use "Adicionar à tela inicial" para abrir como app.
