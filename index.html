@@ -57,6 +57,13 @@ video.mirror{transform:scaleX(-1)}
 #gallerygrid button[aria-pressed="true"] .sel-check{background:var(--accent);border-color:var(--accent);color:#0b0d0c}
 #gallerygrid button[aria-pressed="true"] .sel-check svg{opacity:1}
 #gallerygrid button[aria-pressed="true"] img{transform:scale(.9);opacity:.7}
+#gallerygrid button.stack{background:transparent}
+#gallerygrid button.stack::before,#gallerygrid button.stack::after{content:"";position:absolute;border-radius:4px;width:calc(100% - 8px);height:calc(100% - 8px)}
+#gallerygrid button.stack::before{top:0;right:0;background:#2a302d}
+#gallerygrid button.stack::after{top:4px;right:4px;background:#3a413d}
+#gallerygrid button.stack img{position:absolute;left:0;bottom:0;width:calc(100% - 8px);height:calc(100% - 8px);border-radius:4px;z-index:1}
+#gallerygrid button.stack .badge,#gallerygrid button.stack .sel-check{z-index:2}
+#gallerygrid button.stack .badge{right:12px;bottom:4px}
 .hactions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .btn:disabled{opacity:.4}
 .badge{position:absolute;right:4px;bottom:4px;padding:2px 5px;border-radius:5px;background:rgba(0,0,0,.65);color:var(--fg);font:500 10px/1.2 var(--mono);font-variant-numeric:tabular-nums}
@@ -635,28 +642,75 @@ video.mirror{transform:scaleX(-1)}
     const t = $('thumb'); t.innerHTML = '';
     if (list[0]) { const i = document.createElement('img'); i.alt = ''; i.src = URL.createObjectURL(list[0].blob); i.onload = () => URL.revokeObjectURL(i.src); t.appendChild(i); }
   }
+  // Sequência = mesmo disparo + mesma pessoa + mesma posição
+  const gal = { group: null, title: 'Galeria' };
+  const groupKey = p => p.burst ? `${p.burst}-${p.person}-${p.take || 1}` : null;
+  const byShot = (a, b) => (a.shot || 0) - (b.shot || 0) || a.id - b.id;
+  const plural = (n, a, b) => `${n} ${n === 1 ? a : b}`;
+
   async function openGallery() {
     revokeAll();
-    const list = await allPhotos();
+    const all = await allPhotos();
     const g = $('gallerygrid'); g.innerHTML = '';
-    $('galleryMeta').textContent = list.length ? `${list.length} foto${list.length > 1 ? 's' : ''} neste aparelho` : '';
-    sel.all = list.map(p => p.id); $('btnSelect').hidden = !list.length;
-    if (!list.length) g.innerHTML = '<div class="empty">Nenhuma foto ainda. Toque no botão branco para tirar a primeira.</div>';
-    list.forEach(p => {
-      const b = document.createElement('button'); b.setAttribute('aria-label', 'Abrir foto de ' + fmt(p.id));
-      const i = document.createElement('img'); i.loading = 'lazy'; i.alt = ''; i.src = objURL(p.blob);
+    let items;
+    if (gal.group) {
+      // Dentro de uma sequência: fotos soltas, em ordem de disparo
+      const ps = all.filter(p => groupKey(p) === gal.group).sort(byShot);
+      if (!ps.length) { gal.group = null; return openGallery(); }
+      items = ps.map(p => ({ photos: [p] }));
+      const f = ps[0];
+      gal.title = `Pessoa ${f.person}` + (f.take > 1 ? ` · ${f.take}ª posição` : '');
+      $('galleryMeta').textContent = `${plural(ps.length, 'foto', 'fotos')} · ${fmt(f.id)}`;
+    } else {
+      // Raiz: cada sequência vira uma pilha (capa = 1ª foto), fotos avulsas ficam soltas
+      const map = new Map(); items = [];
+      for (const p of all) {
+        const k = groupKey(p);
+        if (!k) { items.push({ photos: [p] }); continue; }
+        let it = map.get(k);
+        if (!it) { it = { key: k, photos: [] }; map.set(k, it); items.push(it); }
+        it.photos.push(p);
+      }
+      items.forEach(it => it.key && it.photos.sort(byShot));
+      gal.title = 'Galeria';
+      $('galleryMeta').textContent = all.length ? plural(all.length, 'foto', 'fotos') + (map.size ? ` · ${plural(map.size, 'sequência', 'sequências')}` : '') : '';
+    }
+    sel.all = items.flatMap(it => it.photos.map(p => p.id));
+    $('btnSelect').hidden = !sel.all.length;
+    $('btnCloseGallery').textContent = gal.group ? 'Voltar' : 'Fechar';
+    if (!items.length) g.innerHTML = '<div class="empty">Nenhuma foto ainda. Toque no botão branco para tirar a primeira.</div>';
+
+    for (const it of items) {
+      const cover = it.photos[0], ids = it.photos.map(p => p.id);
+      const isStack = !gal.group && it.key && it.photos.length > 1;
+      const b = document.createElement('button'); b.dataset.ids = ids.join(',');
+      if (isStack) b.classList.add('stack');
+      b.setAttribute('aria-label', isStack ? `Abrir sequência com ${ids.length} fotos` : 'Abrir foto de ' + fmt(cover.id));
+      const i = document.createElement('img'); i.loading = 'lazy'; i.alt = ''; i.src = objURL(cover.blob);
       b.appendChild(i);
-      if (p.burst) { const s = document.createElement('span'); s.className = 'badge'; s.textContent = `P${p.person}${p.take > 1 ? '·' + p.take : ''} ${p.shot}/${p.shots}`; b.appendChild(s); }
+      let badge = '';
+      if (cover.burst) {
+        const who = `P${cover.person}${cover.take > 1 ? '·' + cover.take : ''}`;
+        badge = isStack ? `${who} ×${ids.length}` : gal.group ? `${cover.shot}/${cover.shots}` : `${who} ${cover.shot}/${cover.shots}`;
+      }
+      if (badge) { const s = document.createElement('span'); s.className = 'badge'; s.textContent = badge; b.appendChild(s); }
       const ck = document.createElement('span'); ck.className = 'sel-check';
       ck.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5"><path d="m5 12 5 5 9-10"/></svg>';
-      b.appendChild(ck); b.dataset.id = p.id; b.setAttribute('aria-pressed', String(sel.ids.has(p.id)));
-      // Toque longo entra no modo de seleção
+      b.appendChild(ck);
+      b.setAttribute('aria-pressed', String(ids.every(id => sel.ids.has(id))));
+      // Toque longo entra no modo de seleção (numa pilha, seleciona a sequência inteira)
       let lp = 0, longFired = false;
-      b.addEventListener('pointerdown', () => { longFired = false; lp = setTimeout(() => { longFired = true; if (!sel.on) setSelecting(true); toggleSel(p.id, b); navigator.vibrate?.(15); }, 450); });
+      b.addEventListener('pointerdown', () => { longFired = false; lp = setTimeout(() => { longFired = true; if (!sel.on) setSelecting(true); toggleSel(ids, b); navigator.vibrate?.(15); }, 450); });
       ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => b.addEventListener(ev, () => clearTimeout(lp)));
-      b.onclick = () => { if (longFired) return; sel.on ? toggleSel(p.id, b) : openViewer(p); };
+      b.onclick = () => {
+        if (longFired) return;
+        if (sel.on) return toggleSel(ids, b);
+        if (isStack) { gal.group = it.key; openGallery().then(() => { g.scrollTop = 0; }); }
+        else openViewer(cover);
+      };
       g.appendChild(b);
-    });
+    }
+    updateSelUI();
     $('gallery').hidden = false;
   }
   function openViewer(p) {
@@ -687,12 +741,16 @@ video.mirror{transform:scaleX(-1)}
   $('btnStart').onclick = startCamera;
   $('shutter').onclick = capture;
   $('flip').onclick = () => { state.facing = state.facing === 'user' ? 'environment' : 'user'; savePrefs(); startCamera(); };
-  $('thumb').onclick = openGallery;
-  $('btnCloseGallery').onclick = () => { setSelecting(false); $('gallery').hidden = true; revokeAll(); };
+  $('thumb').onclick = () => { gal.group = null; openGallery(); };
+  $('btnCloseGallery').onclick = () => {
+    setSelecting(false);
+    if (gal.group) { gal.group = null; openGallery(); return; } // volta para a galeria
+    $('gallery').hidden = true; revokeAll();
+  };
 
   // ---------- Seleção e exclusão em massa ----------
   const sel = { on: false, ids: new Set(), all: [], armed: false, t: 0 };
-  const gridButtons = () => [...$('gallerygrid').querySelectorAll('button[data-id]')];
+  const gridButtons = () => [...$('gallerygrid').querySelectorAll('button[data-ids]')];
   function disarmDel() { sel.armed = false; clearTimeout(sel.t); }
   function setSelecting(on) {
     sel.on = on; sel.ids.clear(); disarmDel();
@@ -701,14 +759,15 @@ video.mirror{transform:scaleX(-1)}
     gridButtons().forEach(b => b.setAttribute('aria-pressed', 'false'));
     updateSelUI();
   }
-  function toggleSel(id, b) {
-    sel.ids.has(id) ? sel.ids.delete(id) : sel.ids.add(id);
-    b.setAttribute('aria-pressed', String(sel.ids.has(id)));
+  function toggleSel(ids, b) {
+    const on = !ids.every(id => sel.ids.has(id));
+    ids.forEach(id => on ? sel.ids.add(id) : sel.ids.delete(id));
+    b.setAttribute('aria-pressed', String(on));
     disarmDel(); updateSelUI();
   }
   function updateSelUI() {
     const n = sel.ids.size, all = n > 0 && n === sel.all.length;
-    $('galleryTitle').textContent = sel.on ? (n ? `${n} selecionada${n > 1 ? 's' : ''}` : 'Selecione fotos') : 'Galeria';
+    $('galleryTitle').textContent = sel.on ? (n ? `${n} selecionada${n > 1 ? 's' : ''}` : 'Selecione fotos') : gal.title;
     $('btnSelAll').textContent = all ? 'Nenhuma' : 'Todas';
     $('btnDelSel').disabled = !n;
     $('btnDelSel').textContent = sel.armed ? `Confirmar: excluir ${n}` : n ? `Excluir ${n} foto${n > 1 ? 's' : ''}` : 'Excluir';
