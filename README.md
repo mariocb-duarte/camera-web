@@ -8,6 +8,7 @@ App de câmera que roda no navegador do celular. Um único `index.html`, sem bui
 - Câmera traseira e frontal
 - Lanterna e zoom (botões e pinça), quando o aparelho suporta
 - Temporizador 0/3/10s e grade de composição
+- Detecção de rosto em tempo real (MediaPipe, processada no próprio aparelho)
 - Resolução máxima ou HD
 - Galeria local com compartilhar, baixar e excluir
 

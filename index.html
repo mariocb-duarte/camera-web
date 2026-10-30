@@ -29,6 +29,7 @@ button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 #stage{position:relative;flex:1;overflow:hidden;background:#000;touch-action:none}
 video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 video.mirror{transform:scaleX(-1)}
+#faces{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 #grid{position:absolute;inset:0;pointer-events:none;
   background:
     linear-gradient(to right,transparent calc(33.33% - .5px),var(--line) calc(33.33% - .5px),var(--line) calc(33.33% + .5px),transparent calc(33.33% + .5px),transparent calc(66.66% - .5px),var(--line) calc(66.66% - .5px),var(--line) calc(66.66% + .5px),transparent calc(66.66% + .5px)),
@@ -97,6 +98,7 @@ video.mirror{transform:scaleX(-1)}
 <div id="app">
   <div id="stage">
     <video id="video" playsinline autoplay muted></video>
+    <canvas id="faces" hidden></canvas>
     <div id="grid" hidden></div>
     <div id="flashfx"></div>
     <div id="count" hidden></div>
@@ -108,6 +110,9 @@ video.mirror{transform:scaleX(-1)}
         </button>
         <button class="chip" id="btnGrid" aria-pressed="false" title="Grade">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg>Grade
+        </button>
+        <button class="chip" id="btnFace" aria-pressed="false" title="Detecção de rosto">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><circle cx="9.5" cy="10.5" r=".6" fill="currentColor"/><circle cx="14.5" cy="10.5" r=".6" fill="currentColor"/><path d="M9.5 15c1.4 1 3.6 1 5 0"/></svg><span id="faceLabel">Rosto</span>
         </button>
       </div>
       <div class="tgroup">
@@ -174,8 +179,8 @@ video.mirror{transform:scaleX(-1)}
 
   // ---------- Preferências locais ----------
   const prefs = (() => { try { return JSON.parse(localStorage.getItem('cam.prefs') || '{}'); } catch { return {}; } })();
-  Object.assign(state, { timer: prefs.timer ?? 0, grid: !!prefs.grid, facing: prefs.facing || 'environment', hiRes: prefs.hiRes ?? true });
-  const savePrefs = () => { try { localStorage.setItem('cam.prefs', JSON.stringify({ timer: state.timer, grid: state.grid, facing: state.facing, hiRes: state.hiRes })); } catch {} };
+  Object.assign(state, { timer: prefs.timer ?? 0, grid: !!prefs.grid, facing: prefs.facing || 'environment', hiRes: prefs.hiRes ?? true, face: !!prefs.face });
+  const savePrefs = () => { try { localStorage.setItem('cam.prefs', JSON.stringify({ timer: state.timer, grid: state.grid, facing: state.facing, hiRes: state.hiRes, face: state.face })); } catch {} };
 
   // ---------- Armazenamento (IndexedDB) ----------
   const db = new Promise((res, rej) => {
@@ -246,6 +251,86 @@ video.mirror{transform:scaleX(-1)}
   $('stage').addEventListener('touchend', () => { pinch = null; });
   const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
   let zt = 0; const setZoomThrottled = z => { const n = performance.now(); if (n - zt > 60) { zt = n; setZoom(z); } };
+
+  // ---------- Detecção de rosto (MediaPipe, roda no aparelho) ----------
+  const MP = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+  const FACE_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite';
+  const faceCanvas = $('faces'), fctx = faceCanvas.getContext('2d');
+  const face = { on: false, detector: null, loading: null, raf: 0, lastTs: 0, lastVT: -1, n: -1 };
+  const ACCENT = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#ffcc33';
+
+  async function loadDetector() {
+    if (face.detector) return face.detector;
+    face.loading ??= (async () => {
+      const { FaceDetector, FilesetResolver } = await import(MP + '/vision_bundle.mjs');
+      const fileset = await FilesetResolver.forVisionTasks(MP + '/wasm');
+      const opts = delegate => ({ baseOptions: { modelAssetPath: FACE_MODEL, delegate }, runningMode: 'VIDEO', minDetectionConfidence: 0.5 });
+      try { return await FaceDetector.createFromOptions(fileset, opts('GPU')); }
+      catch { return await FaceDetector.createFromOptions(fileset, opts('CPU')); }
+    })();
+    try { face.detector = await face.loading; } catch (e) { face.loading = null; throw e; }
+    return face.detector;
+  }
+
+  function sizeFaceCanvas() {
+    const dpr = window.devicePixelRatio || 1, w = Math.round(faceCanvas.clientWidth * dpr), h = Math.round(faceCanvas.clientHeight * dpr);
+    if (faceCanvas.width !== w || faceCanvas.height !== h) { faceCanvas.width = w; faceCanvas.height = h; }
+    fctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function faceLoop() {
+    face.raf = requestAnimationFrame(faceLoop);
+    if (!face.detector || video.readyState < 2 || !video.videoWidth || video.currentTime === face.lastVT) return;
+    face.lastVT = video.currentTime;
+    const ts = Math.max(performance.now(), face.lastTs + 1); face.lastTs = ts;
+    let res; try { res = face.detector.detectForVideo(video, ts); } catch { return; }
+    drawFaces(res.detections || []);
+  }
+
+  function drawFaces(dets) {
+    sizeFaceCanvas();
+    const cw = faceCanvas.clientWidth, ch = faceCanvas.clientHeight, vw = video.videoWidth, vh = video.videoHeight;
+    fctx.clearRect(0, 0, cw, ch);
+    // Mesmo enquadramento do vídeo (object-fit: cover) e espelhamento da câmera frontal
+    const s = Math.max(cw / vw, ch / vh), ox = (cw - vw * s) / 2, oy = (ch - vh * s) / 2, mirror = state.facing === 'user';
+    fctx.strokeStyle = ACCENT; fctx.lineWidth = 2.5; fctx.lineCap = 'round';
+    fctx.font = '500 11px "IBM Plex Mono", ui-monospace, monospace'; fctx.textBaseline = 'top';
+    for (const d of dets) {
+      const b = d.boundingBox; const w = b.width * s, h = b.height * s, y = b.originY * s + oy;
+      let x = b.originX * s + ox; if (mirror) x = cw - x - w;
+      const k = Math.min(w, h) * 0.22; // cantoneiras
+      fctx.beginPath();
+      fctx.moveTo(x, y + k); fctx.lineTo(x, y); fctx.lineTo(x + k, y);
+      fctx.moveTo(x + w - k, y); fctx.lineTo(x + w, y); fctx.lineTo(x + w, y + k);
+      fctx.moveTo(x + w, y + h - k); fctx.lineTo(x + w, y + h); fctx.lineTo(x + w - k, y + h);
+      fctx.moveTo(x + k, y + h); fctx.lineTo(x, y + h); fctx.lineTo(x, y + h - k);
+      fctx.stroke();
+      fctx.strokeStyle = 'rgba(255,204,51,.35)'; fctx.lineWidth = 1; fctx.strokeRect(x, y, w, h);
+      fctx.strokeStyle = ACCENT; fctx.lineWidth = 2.5;
+      const score = Math.round((d.categories?.[0]?.score ?? 0) * 100) + '%';
+      const tw = fctx.measureText(score).width + 8;
+      fctx.fillStyle = ACCENT; fctx.fillRect(x, y - 18, tw, 16);
+      fctx.fillStyle = '#0b0d0c'; fctx.fillText(score, x + 4, y - 16);
+    }
+    if (dets.length !== face.n) { face.n = dets.length; setFaceUI(); }
+  }
+
+  function setFaceUI(loading) {
+    $('btnFace').setAttribute('aria-pressed', String(face.on));
+    $('faceLabel').textContent = loading ? 'Carregando…' : face.on && face.n > 0 ? `Rosto ${face.n}` : 'Rosto';
+  }
+
+  async function enableFaces() {
+    face.on = true; setFaceUI(true);
+    try { await loadDetector(); }
+    catch { face.on = false; setFaceUI(); toast('Não foi possível carregar a detecção de rosto. Verifique a internet.'); return; }
+    if (!face.on) return;
+    faceCanvas.hidden = false; face.n = -1; cancelAnimationFrame(face.raf); faceLoop(); setFaceUI();
+  }
+  function disableFaces() {
+    face.on = false; cancelAnimationFrame(face.raf); fctx.clearRect(0, 0, faceCanvas.width, faceCanvas.height); faceCanvas.hidden = true; face.n = -1; setFaceUI();
+  }
+  $('btnFace').onclick = () => { face.on ? disableFaces() : enableFaces(); state.face = face.on; savePrefs(); };
 
   // ---------- Captura ----------
   async function capture() {
@@ -364,6 +449,7 @@ video.mirror{transform:scaleX(-1)}
 
   // ---------- Início ----------
   applyUI(); refreshThumb();
+  if (state.face) enableFaces();
   if (!navigator.mediaDevices?.getUserMedia) showGate(new Error('Navegador sem suporte a câmera'));
   else if (!window.isSecureContext) showGate(new Error('insecure'));
   else navigator.permissions?.query({ name: 'camera' }).then(p => { if (p.state === 'granted') startCamera(); }).catch(() => {});
