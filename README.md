@@ -9,7 +9,7 @@ App de câmera que roda no navegador do celular. Um único `index.html`, sem bui
 - Lanterna e zoom (botões e pinça), quando o aparelho suporta
 - Temporizador 0/3/10s e grade de composição
 - Detecção de rosto em tempo real (MediaPipe, processada no próprio aparelho)
-- Modo Auto: fotografa cada pessoa nova uma única vez (5 fotos em sequência, com foco no rosto quando o aparelho suporta). Usa reconhecimento facial no aparelho para não repetir quem já foi fotografado
+- Modo Auto: fotografa cada pessoa nova uma única vez (5 fotos em sequência, com foco no rosto quando o aparelho suporta). Usa reconhecimento facial no aparelho para não repetir quem já foi fotografado; se todos já foram fotografados e alguém muda de posição, refaz a sequência dessa pessoa
 - Resolução máxima ou HD
 - Galeria local com compartilhar, baixar e excluir
 

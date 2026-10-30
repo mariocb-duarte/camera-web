@@ -354,13 +354,15 @@ video.mirror{transform:scaleX(-1)}
   // ---------- Disparo automático: uma sequência por pessoa nova ----------
   const BURST = 5;          // fotos por pessoa
   const BURST_GAP = 180;    // ms entre fotos da sequência
-  const STABLE_MS = 700;    // rosto precisa ficar na tela por esse tempo antes de identificar
+  const STABLE_MS = 700;    // rosto precisa ficar parado por esse tempo antes de identificar/refotografar
   const MATCH_DIST = 0.55;  // distância máxima para considerar "mesma pessoa" (menor = mais rígido)
+  const MOVE_DIST = 0.12;   // deslocamento (fração da largura do quadro) que conta como "mudou de posição"
+  const MOVE_SCALE = 1.4;   // aproximou/afastou: rosto ficou 40% maior ou menor
   const GREEN = '#3ddc84', RED = '#ff5a4e';
   const FA = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13';
   const auto = { on: false, warnedFocus: false, warnedRecog: false };
   const tracks = []; let nextTrack = 1;     // rostos acompanhados quadro a quadro
-  const known = [];                         // assinaturas de quem já foi fotografado
+  const known = [];                         // pessoas fotografadas: { desc, pos, takes }
   let faceapi = null, faLoading = null, describing = false;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -393,7 +395,17 @@ video.mirror{transform:scaleX(-1)}
     const r = await fa.detectSingleFace(c, new fa.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.3 })).withFaceLandmarks().withFaceDescriptor();
     return r?.descriptor || null;
   }
-  const isKnown = desc => !!faceapi && known.some(k => faceapi.euclideanDistance(k, desc) < MATCH_DIST);
+  // Índice da pessoa já fotografada mais parecida, ou -1
+  function matchKnown(desc) {
+    if (!faceapi || !desc) return -1;
+    let best = -1, bd = MATCH_DIST;
+    known.forEach((k, i) => { if (k.desc) { const d = faceapi.euclideanDistance(k.desc, desc); if (d < bd) { bd = d; best = i; } } });
+    return best;
+  }
+
+  // Posição normalizada do rosto no quadro (centro e tamanho)
+  const posOf = b => ({ cx: (b.originX + b.width / 2) / video.videoWidth, cy: (b.originY + b.height / 2) / video.videoHeight, s: b.width / video.videoWidth });
+  const hasMoved = (a, b) => Math.hypot(a.cx - b.cx, a.cy - b.cy) > MOVE_DIST || Math.max(a.s / b.s, b.s / a.s) > MOVE_SCALE;
 
   // Acompanha cada rosto entre quadros (sobreposição das caixas)
   const iou = (a, b) => {
@@ -407,8 +419,11 @@ video.mirror{transform:scaleX(-1)}
     for (const d of dets) {
       let best = null, bv = 0;
       for (const t of tracks) { if (used.has(t)) continue; const v = iou(t.box, d.boundingBox); if (v > bv) { bv = v; best = t; } }
-      if (!best || bv < 0.25) { best = { id: nextTrack++, firstSeen: now, status: 'pending', tries: 0 }; tracks.push(best); }
+      if (!best || bv < 0.25) { best = { id: nextTrack++, firstSeen: now, status: 'pending', tries: 0, person: -1 }; tracks.push(best); }
       best.box = d.boundingBox; best.det = d; best.lastSeen = now; used.add(best); d._t = best;
+      // "Parado desde": reinicia quando o rosto se mexe um pouco
+      const p = posOf(d.boundingBox);
+      if (!best.anchor || Math.hypot(p.cx - best.anchor.cx, p.cy - best.anchor.cy) > 0.03) { best.anchor = p; best.stillSince = now; }
     }
     for (let i = tracks.length - 1; i >= 0; i--) if (now - tracks[i].lastSeen > 1000 && tracks[i].status !== 'shooting') tracks.splice(i, 1);
   }
@@ -416,22 +431,31 @@ video.mirror{transform:scaleX(-1)}
   function autoTick() {
     if (!auto.on) return;
     const now = performance.now();
+    const visible = tracks.filter(t => now - t.lastSeen < 300);
     if (!describing) {
-      const t = tracks.find(t => t.status === 'pending' && now - t.firstSeen > STABLE_MS && now - t.lastSeen < 200);
+      const t = visible.find(t => t.status === 'pending' && now - t.firstSeen > STABLE_MS);
       if (t) identify(t);
     }
-    if (!state.busy) {
-      const fresh = tracks.filter(t => t.status === 'new' && now - t.lastSeen < 300);
-      if (fresh.length) burst(fresh);
-    }
+    if (state.busy) return;
+    // 1) Pessoas novas primeiro
+    const fresh = visible.filter(t => t.status === 'new');
+    if (fresh.length) return burst(fresh);
+    // 2) Todos na cena já fotografados: refaz quem mudou de posição, a partir do primeiro fotografado
+    if (!visible.length || visible.some(t => t.status === 'pending')) return;
+    const moved = visible
+      .filter(t => t.person >= 0 && known[t.person]?.pos && now - t.stillSince > STABLE_MS && hasMoved(posOf(t.box), known[t.person].pos))
+      .sort((a, b) => a.person - b.person);
+    if (moved.length) burst(moved);
   }
 
   async function identify(t) {
     describing = true;
     try {
       const d = await describe(t.box);
-      if (d) { t.desc = d; t.status = isKnown(d) ? 'known' : 'new'; }
-      else if (++t.tries >= 3) t.status = 'new'; // não conseguiu ler o rosto: fotografa mesmo assim
+      if (d) {
+        t.desc = d; t.person = matchKnown(d);
+        t.status = t.person >= 0 ? 'known' : 'new';
+      } else if (++t.tries >= 3) t.status = 'new'; // não conseguiu ler o rosto: fotografa mesmo assim
     } catch {
       t.status = 'new';
       if (!auto.warnedRecog) { auto.warnedRecog = true; toast('Reconhecimento indisponível: só evita repetir enquanto a pessoa fica na tela'); }
@@ -478,27 +502,35 @@ video.mirror{transform:scaleX(-1)}
   async function burst(targets) {
     if (state.busy || !state.track) return;
     state.busy = true; $('shutter').disabled = true; setAutoUI();
-    const burstId = Date.now(); let saved = 0, people = 0, focusedAny = false;
+    const burstId = Date.now(); let saved = 0, fresh = 0, retakes = 0, focusedAny = false;
     try {
       for (const t of targets) {
-        if (t.desc && isKnown(t.desc)) { t.status = 'known'; continue; } // mesma pessoa em outro rastro
-        t.status = 'shooting'; people++;
+        if (t.status === 'new') {
+          const m = matchKnown(t.desc); // mesma pessoa em outro rastro
+          if (m >= 0) { t.person = m; t.status = 'known'; continue; }
+          t.person = known.push({ desc: t.desc || null, pos: null, takes: 0 }) - 1; fresh++;
+        } else retakes++;
+        const k = known[t.person]; k.takes++;
+        t.status = 'shooting';
         if (await focusOn(t.det)) focusedAny = true;
         for (let i = 0; i < BURST; i++) {
           flash();
           const blob = await frameBlob();
           const st = state.track.getSettings();
           await putPhoto({ id: burstId + saved, blob, type: blob.type, width: st.width, height: st.height, facing: state.facing, zoom: state.zoom,
-            burst: burstId, person: known.length + 1, shot: i + 1, shots: BURST });
+            burst: burstId, person: t.person + 1, take: k.takes, shot: i + 1, shots: BURST });
           saved++;
           if (i < BURST - 1) await sleep(BURST_GAP);
         }
-        if (t.desc) known.push(t.desc);
+        k.pos = posOf(t.box); // posição em que foi fotografada
         t.status = 'done'; setAutoUI();
       }
       if (saved) {
         refreshThumb();
-        let msg = `${saved} fotos · ${people} pessoa${people > 1 ? 's' : ''} nova${people > 1 ? 's' : ''}`;
+        const parts = [];
+        if (fresh) parts.push(`${fresh} pessoa${fresh > 1 ? 's' : ''} nova${fresh > 1 ? 's' : ''}`);
+        if (retakes) parts.push(`${retakes} em nova posição`);
+        let msg = `${saved} fotos · ${parts.join(' · ')}`;
         if (!focusedAny && !auto.warnedFocus) { msg += ' · sem foco por ponto neste aparelho'; auto.warnedFocus = true; }
         toast(msg);
       }
@@ -576,7 +608,7 @@ video.mirror{transform:scaleX(-1)}
       const b = document.createElement('button'); b.setAttribute('aria-label', 'Abrir foto de ' + fmt(p.id));
       const i = document.createElement('img'); i.loading = 'lazy'; i.alt = ''; i.src = objURL(p.blob);
       b.appendChild(i);
-      if (p.burst) { const s = document.createElement('span'); s.className = 'badge'; s.textContent = `P${p.person} ${p.shot}/${p.shots}`; b.appendChild(s); }
+      if (p.burst) { const s = document.createElement('span'); s.className = 'badge'; s.textContent = `P${p.person}${p.take > 1 ? '·' + p.take : ''} ${p.shot}/${p.shots}`; b.appendChild(s); }
       b.onclick = () => openViewer(p); g.appendChild(b);
     });
     $('gallery').hidden = false;
@@ -586,7 +618,7 @@ video.mirror{transform:scaleX(-1)}
     $('viewerImg').src = objURL(p.blob);
     $('viewerTitle').textContent = fmt(p.id);
     $('viewerMeta').textContent = [p.width && p.height ? `${p.width}×${p.height}` : '', (p.blob.size / 1024 / 1024).toFixed(1) + ' MB', p.facing === 'user' ? 'frontal' : 'traseira',
-      p.burst ? `pessoa ${p.person} · sequência ${p.shot}/${p.shots}` : ''].filter(Boolean).join(' · ');
+      p.burst ? `pessoa ${p.person}` + (p.take > 1 ? ` · ${p.take}ª posição` : '') + ` · sequência ${p.shot}/${p.shots}` : ''].filter(Boolean).join(' · ');
     $('viewer').hidden = false;
     $('btnShare').hidden = !navigator.canShare;
   }
