@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#0b0d0c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Câmera Web</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Archivo:wght@500;700&display=swap">
+<style>
+/* Layout: viewfinder em tela cheia, barra superior de ajustes, trilho inferior com galeria / disparo / troca de câmera */
+:root{
+  --bg:#0b0d0c; --panel:rgba(14,17,16,.72); --fg:#eef1ee; --muted:#9aa39e;
+  --accent:#ffcc33; --danger:#ff5a4e; --line:rgba(238,241,238,.18);
+  --ui:"Archivo",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:var(--ui);overflow:hidden;overscroll-behavior:none}
+[hidden]{display:none!important}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+#app{position:fixed;inset:0;display:flex;flex-direction:column}
+#stage{position:relative;flex:1;overflow:hidden;background:#000;touch-action:none}
+video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+video.mirror{transform:scaleX(-1)}
+#grid{position:absolute;inset:0;pointer-events:none;
+  background:
+    linear-gradient(to right,transparent calc(33.33% - .5px),var(--line) calc(33.33% - .5px),var(--line) calc(33.33% + .5px),transparent calc(33.33% + .5px),transparent calc(66.66% - .5px),var(--line) calc(66.66% - .5px),var(--line) calc(66.66% + .5px),transparent calc(66.66% + .5px)),
+    linear-gradient(to bottom,transparent calc(33.33% - .5px),var(--line) calc(33.33% - .5px),var(--line) calc(33.33% + .5px),transparent calc(33.33% + .5px),transparent calc(66.66% - .5px),var(--line) calc(66.66% - .5px),var(--line) calc(66.66% + .5px),transparent calc(66.66% + .5px))}
+#flashfx{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .25s}
+#flashfx.on{opacity:.85;transition:none}
+#count{position:absolute;inset:0;display:grid;place-items:center;font:700 22vmin/1 var(--ui);color:var(--fg);text-shadow:0 2px 24px rgba(0,0,0,.6);pointer-events:none}
+
+/* Barra superior */
+#top{position:absolute;top:0;left:0;right:0;z-index:5;display:flex;gap:8px;justify-content:space-between;align-items:center;
+  padding:calc(env(safe-area-inset-top,0px) + 10px) max(16px,env(safe-area-inset-right,0px)) 10px max(16px,env(safe-area-inset-left,0px));
+  background:linear-gradient(to bottom,rgba(0,0,0,.55),transparent)}
+.tgroup{display:flex;gap:6px}
+.chip{display:flex;align-items:center;gap:6px;height:36px;padding:0 12px;border-radius:18px;background:var(--panel);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  font:500 12px/1 var(--mono);letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.chip[aria-pressed="true"]{color:var(--bg);background:var(--accent)}
+.chip svg{width:16px;height:16px}
+
+/* Zoom */
+#zoombar{position:absolute;left:50%;transform:translateX(-50%);bottom:14px;z-index:5;display:flex;gap:6px;padding:4px;border-radius:20px;background:var(--panel);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+#zoombar button{min-width:40px;height:32px;border-radius:16px;font:500 12px/1 var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
+#zoombar button.on{color:var(--accent);background:rgba(255,204,51,.14)}
+
+/* Trilho inferior */
+#bottom{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;
+  padding:18px max(24px,env(safe-area-inset-right,0px)) calc(env(safe-area-inset-bottom,0px) + 22px) max(24px,env(safe-area-inset-left,0px));background:var(--bg)}
+#thumb{justify-self:start;width:52px;height:52px;border-radius:12px;overflow:hidden;border:1.5px solid var(--line);background:#161a18}
+#thumb img{width:100%;height:100%;object-fit:cover;display:block}
+#shutter{width:76px;height:76px;border-radius:50%;border:4px solid var(--fg);display:grid;place-items:center}
+#shutter span{width:60px;height:60px;border-radius:50%;background:var(--fg);transition:transform .12s}
+#shutter:active span{transform:scale(.88)}
+#shutter:disabled{opacity:.4}
+#flip{justify-self:end;width:52px;height:52px;border-radius:50%;background:#161a18;display:grid;place-items:center}
+#flip svg{width:24px;height:24px}
+
+/* Telas sobrepostas */
+.sheet{position:fixed;inset:0;z-index:20;background:var(--bg);display:flex;flex-direction:column}
+.sheet header{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:calc(env(safe-area-inset-top,0px) + 12px) max(16px,env(safe-area-inset-right,0px)) 12px max(16px,env(safe-area-inset-left,0px));border-bottom:1px solid var(--line)}
+.sheet h2{margin:0;font:700 18px/1.2 var(--ui)}
+.sheet .meta{font:400 12px/1 var(--mono);color:var(--muted)}
+.btn{height:38px;padding:0 14px;border-radius:10px;background:#1a1f1c;font:500 14px/1 var(--ui)}
+.btn.primary{background:var(--accent);color:var(--bg)}
+.btn.danger{color:var(--danger)}
+#gallerygrid{flex:1;overflow-y:auto;display:grid;grid-template-columns:repeat(3,1fr);gap:2px;align-content:start;padding:2px max(2px,env(safe-area-inset-right,0px)) calc(env(safe-area-inset-bottom,0px) + 2px) max(2px,env(safe-area-inset-left,0px))}
+#gallerygrid button{aspect-ratio:1;max-width:100%;padding:0;background:#161a18}
+#gallerygrid img{width:100%;height:100%;object-fit:cover;display:block}
+.empty{grid-column:1/-1;padding:48px 24px;text-align:center;color:var(--muted);font-size:15px;line-height:1.5}
+#viewer .imgwrap{flex:1;min-height:0;display:grid;place-items:center;background:#000}
+#viewer img{max-width:100%;max-height:100%;object-fit:contain}
+#viewer footer{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;
+  padding:12px max(16px,env(safe-area-inset-right,0px)) calc(env(safe-area-inset-bottom,0px) + 14px) max(16px,env(safe-area-inset-left,0px))}
+
+/* Erro / permissão */
+#gate{position:absolute;inset:0;z-index:8;display:grid;place-items:center;padding:24px max(16px,env(safe-area-inset-right,0px)) 24px max(16px,env(safe-area-inset-left,0px));background:var(--bg);text-align:center}
+#gate div{max-width:34ch}
+#gate h1{font:700 22px/1.25 var(--ui);margin:0 0 10px;text-wrap:balance}
+#gate p{color:var(--muted);line-height:1.5;margin:0 0 20px}
+#toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 130px);transform:translateX(-50%);z-index:30;
+  padding:10px 16px;border-radius:10px;background:var(--panel);backdrop-filter:blur(10px);font:500 13px/1.2 var(--ui);opacity:0;transition:opacity .2s;pointer-events:none}
+#toast.on{opacity:1}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <video id="video" playsinline autoplay muted></video>
+    <div id="grid" hidden></div>
+    <div id="flashfx"></div>
+    <div id="count" hidden></div>
+
+    <div id="top">
+      <div class="tgroup">
+        <button class="chip" id="btnTorch" aria-pressed="false" hidden title="Lanterna">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>Luz
+        </button>
+        <button class="chip" id="btnGrid" aria-pressed="false" title="Grade">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg>Grade
+        </button>
+      </div>
+      <div class="tgroup">
+        <button class="chip" id="btnTimer" aria-pressed="false" title="Temporizador">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M9 2h6"/></svg><span id="timerLabel">0s</span>
+        </button>
+        <button class="chip" id="btnRes" title="Resolução"><span id="resLabel">—</span></button>
+      </div>
+    </div>
+
+    <div id="zoombar" hidden></div>
+
+    <div id="gate">
+      <div>
+        <h1 id="gateTitle">Permita o acesso à câmera</h1>
+        <p id="gateText">O app usa a câmera do seu celular direto no navegador. Nada é enviado para servidor: as fotos ficam salvas só neste aparelho.</p>
+        <button class="btn primary" id="btnStart">Abrir câmera</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="bottom">
+    <button id="thumb" aria-label="Abrir galeria"></button>
+    <button id="shutter" aria-label="Tirar foto" disabled><span></span></button>
+    <button id="flip" aria-label="Trocar câmera">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8M4 4v4h4M4 13a8 8 0 0 0 14.3 4.9L20 16m0 4v-4h-4"/></svg>
+    </button>
+  </div>
+</div>
+
+<section class="sheet" id="gallery" hidden>
+  <header>
+    <div><h2>Galeria</h2><div class="meta" id="galleryMeta"></div></div>
+    <button class="btn" id="btnCloseGallery">Fechar</button>
+  </header>
+  <div id="gallerygrid"></div>
+</section>
+
+<section class="sheet" id="viewer" hidden>
+  <header>
+    <div><h2 id="viewerTitle">Foto</h2><div class="meta" id="viewerMeta"></div></div>
+    <button class="btn" id="btnCloseViewer">Voltar</button>
+  </header>
+  <div class="imgwrap"><img id="viewerImg" alt="Foto capturada"></div>
+  <footer>
+    <button class="btn primary" id="btnShare">Compartilhar</button>
+    <button class="btn" id="btnDownload">Baixar</button>
+    <button class="btn danger" id="btnDelete">Excluir</button>
+  </footer>
+</section>
+
+<div id="toast" role="status"></div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const video = $('video');
+  const state = {
+    stream: null, track: null, facing: 'environment', torch: false,
+    timer: 0, grid: false, zoom: 1, busy: false, current: null,
+    hiRes: true,
+  };
+  const TIMERS = [0, 3, 10];
+
+  // ---------- Preferências locais ----------
+  const prefs = (() => { try { return JSON.parse(localStorage.getItem('cam.prefs') || '{}'); } catch { return {}; } })();
+  Object.assign(state, { timer: prefs.timer ?? 0, grid: !!prefs.grid, facing: prefs.facing || 'environment', hiRes: prefs.hiRes ?? true });
+  const savePrefs = () => { try { localStorage.setItem('cam.prefs', JSON.stringify({ timer: state.timer, grid: state.grid, facing: state.facing, hiRes: state.hiRes })); } catch {} };
+
+  // ---------- Armazenamento (IndexedDB) ----------
+  const db = new Promise((res, rej) => {
+    const r = indexedDB.open('camera-web', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('photos', { keyPath: 'id' });
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+  const tx = async (mode, fn) => { const d = await db; return new Promise((res, rej) => { const t = d.transaction('photos', mode); const s = t.objectStore('photos'); const out = fn(s); t.oncomplete = () => res(out.result ?? out); t.onerror = () => rej(t.error); }); };
+  const putPhoto = p => tx('readwrite', s => s.put(p));
+  const delPhoto = id => tx('readwrite', s => s.delete(id));
+  const allPhotos = async () => (await tx('readonly', s => s.getAll())).sort((a, b) => b.id - a.id);
+
+  // ---------- Câmera ----------
+  async function startCamera() {
+    stopCamera();
+    const size = state.hiRes ? { width: { ideal: 4096 }, height: { ideal: 3072 } } : { width: { ideal: 1280 }, height: { ideal: 720 } };
+    try {
+      state.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: state.facing }, ...size } });
+    } catch (e) {
+      return showGate(e);
+    }
+    state.track = state.stream.getVideoTracks()[0];
+    video.srcObject = state.stream;
+    video.classList.toggle('mirror', state.facing === 'user');
+    await video.play().catch(() => {});
+    $('gate').hidden = true;
+    $('shutter').disabled = false;
+    state.torch = false; state.zoom = 1;
+    setupCapabilities();
+  }
+  function stopCamera() { state.stream?.getTracks().forEach(t => t.stop()); state.stream = null; state.track = null; }
+
+  function showGate(e) {
+    $('gate').hidden = false; $('shutter').disabled = true;
+    if (!window.isSecureContext) { $('gateTitle').textContent = 'Abra o app por HTTPS'; $('gateText').textContent = 'O navegador só libera a câmera em páginas seguras (https://) ou em localhost.'; return; }
+    if (e?.name === 'NotAllowedError') { $('gateTitle').textContent = 'Acesso à câmera negado'; $('gateText').textContent = 'Libere a câmera nas permissões do site (ícone de cadeado na barra de endereço) e toque em tentar de novo.'; }
+    else if (e?.name === 'NotFoundError') { $('gateTitle').textContent = 'Nenhuma câmera encontrada'; $('gateText').textContent = 'Este aparelho não informou nenhuma câmera ao navegador.'; }
+    else if (e) { $('gateTitle').textContent = 'Não foi possível abrir a câmera'; $('gateText').textContent = (e.message || e.name) + '. Feche outros apps que estejam usando a câmera e tente de novo.'; }
+    $('btnStart').textContent = e ? 'Tentar de novo' : 'Abrir câmera';
+  }
+
+  function setupCapabilities() {
+    const caps = state.track.getCapabilities?.() || {};
+    const st = state.track.getSettings();
+    $('resLabel').textContent = st.width && st.height ? `${Math.max(st.width, st.height)}p` : '—';
+    // Lanterna
+    $('btnTorch').hidden = !caps.torch;
+    $('btnTorch').setAttribute('aria-pressed', 'false');
+    // Zoom
+    const zb = $('zoombar'); zb.innerHTML = '';
+    if (caps.zoom && caps.zoom.max > caps.zoom.min) {
+      const opts = [caps.zoom.min, 1, 2, 3, 5].filter((v, i, a) => v >= caps.zoom.min && v <= caps.zoom.max && a.indexOf(v) === i).sort((a, b) => a - b);
+      opts.forEach(v => { const b = document.createElement('button'); b.textContent = (v % 1 ? v.toFixed(1) : v) + '×'; b.dataset.z = v; b.onclick = () => setZoom(v); zb.appendChild(b); });
+      zb.hidden = false; state.zoomCaps = caps.zoom; markZoom(st.zoom || 1);
+    } else { zb.hidden = true; state.zoomCaps = null; }
+  }
+  async function setZoom(v) {
+    if (!state.zoomCaps) return;
+    v = Math.min(state.zoomCaps.max, Math.max(state.zoomCaps.min, v));
+    try { await state.track.applyConstraints({ advanced: [{ zoom: v }] }); state.zoom = v; markZoom(v); } catch {}
+  }
+  const markZoom = v => [...$('zoombar').children].forEach(b => b.classList.toggle('on', Math.abs(+b.dataset.z - v) < .05));
+
+  // Pinça para zoom
+  let pinch = null;
+  $('stage').addEventListener('touchstart', e => { if (e.touches.length === 2 && state.zoomCaps) pinch = { d: dist(e.touches), z: state.zoom }; }, { passive: true });
+  $('stage').addEventListener('touchmove', e => { if (pinch && e.touches.length === 2) { const z = pinch.z * dist(e.touches) / pinch.d; setZoomThrottled(z); } }, { passive: true });
+  $('stage').addEventListener('touchend', () => { pinch = null; });
+  const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  let zt = 0; const setZoomThrottled = z => { const n = performance.now(); if (n - zt > 60) { zt = n; setZoom(z); } };
+
+  // ---------- Captura ----------
+  async function capture() {
+    if (state.busy || !state.track) return;
+    state.busy = true; $('shutter').disabled = true;
+    try {
+      if (state.timer) await countdown(state.timer);
+      flash();
+      const blob = await grabFrame();
+      const st = state.track.getSettings();
+      const photo = { id: Date.now(), blob, type: blob.type, width: st.width, height: st.height, facing: state.facing, zoom: state.zoom };
+      await putPhoto(photo);
+      refreshThumb();
+      toast('Foto salva');
+    } catch (e) { toast('Falha ao capturar: ' + (e.message || e.name)); }
+    finally { state.busy = false; $('shutter').disabled = false; }
+  }
+
+  async function grabFrame() {
+    // Tenta ImageCapture (resolução máxima do sensor, quando disponível)
+    if ('ImageCapture' in window && state.facing !== 'user') {
+      try {
+        const ic = new ImageCapture(state.track);
+        const opts = {}; if (state.torch) opts.fillLightMode = 'flash';
+        return await ic.takePhoto(opts);
+      } catch {}
+    }
+    // Fallback: quadro do vídeo no canvas
+    const w = video.videoWidth, h = video.videoHeight;
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    if (state.facing === 'user') { ctx.translate(w, 0); ctx.scale(-1, 1); }
+    ctx.drawImage(video, 0, 0, w, h);
+    return await new Promise(r => c.toBlob(r, 'image/jpeg', .92));
+  }
+
+  function countdown(n) {
+    return new Promise(res => {
+      const el = $('count'); el.hidden = false; el.textContent = n;
+      const iv = setInterval(() => { n--; if (n <= 0) { clearInterval(iv); el.hidden = true; res(); } else el.textContent = n; }, 1000);
+    });
+  }
+  function flash() { const f = $('flashfx'); f.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => f.classList.remove('on'))); navigator.vibrate?.(30); }
+
+  // ---------- Galeria ----------
+  let urls = [];
+  const revokeAll = () => { urls.forEach(URL.revokeObjectURL); urls = []; };
+  const objURL = b => { const u = URL.createObjectURL(b); urls.push(u); return u; };
+
+  async function refreshThumb() {
+    const list = await allPhotos();
+    const t = $('thumb'); t.innerHTML = '';
+    if (list[0]) { const i = document.createElement('img'); i.alt = ''; i.src = URL.createObjectURL(list[0].blob); i.onload = () => URL.revokeObjectURL(i.src); t.appendChild(i); }
+  }
+  async function openGallery() {
+    revokeAll();
+    const list = await allPhotos();
+    const g = $('gallerygrid'); g.innerHTML = '';
+    $('galleryMeta').textContent = list.length ? `${list.length} foto${list.length > 1 ? 's' : ''} neste aparelho` : '';
+    if (!list.length) g.innerHTML = '<div class="empty">Nenhuma foto ainda. Toque no botão branco para tirar a primeira.</div>';
+    list.forEach(p => {
+      const b = document.createElement('button'); b.setAttribute('aria-label', 'Abrir foto de ' + fmt(p.id));
+      const i = document.createElement('img'); i.loading = 'lazy'; i.alt = ''; i.src = objURL(p.blob);
+      b.appendChild(i); b.onclick = () => openViewer(p); g.appendChild(b);
+    });
+    $('gallery').hidden = false;
+  }
+  function openViewer(p) {
+    state.current = p;
+    $('viewerImg').src = objURL(p.blob);
+    $('viewerTitle').textContent = fmt(p.id);
+    $('viewerMeta').textContent = [p.width && p.height ? `${p.width}×${p.height}` : '', (p.blob.size / 1024 / 1024).toFixed(1) + ' MB', p.facing === 'user' ? 'frontal' : 'traseira'].filter(Boolean).join(' · ');
+    $('viewer').hidden = false;
+    $('btnShare').hidden = !navigator.canShare;
+  }
+  const fmt = ts => new Date(ts).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const fileName = p => 'foto_' + new Date(p.id).toISOString().replace(/[-:T]/g, '').slice(0, 14) + '.jpg';
+
+  $('btnShare').onclick = async () => {
+    const p = state.current; const f = new File([p.blob], fileName(p), { type: p.type || 'image/jpeg' });
+    try { if (navigator.canShare?.({ files: [f] })) await navigator.share({ files: [f] }); else toast('Compartilhamento não suportado'); } catch {}
+  };
+  $('btnDownload').onclick = () => { const p = state.current; const a = document.createElement('a'); a.href = URL.createObjectURL(p.blob); a.download = fileName(p); a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); };
+  let delArmed = false;
+  $('btnDelete').onclick = async () => {
+    if (!delArmed) { delArmed = true; $('btnDelete').textContent = 'Confirmar exclusão'; setTimeout(() => { delArmed = false; $('btnDelete').textContent = 'Excluir'; }, 3000); return; }
+    delArmed = false; $('btnDelete').textContent = 'Excluir';
+    await delPhoto(state.current.id); $('viewer').hidden = true; toast('Foto excluída'); openGallery(); refreshThumb();
+  };
+
+  // ---------- Controles ----------
+  $('btnStart').onclick = startCamera;
+  $('shutter').onclick = capture;
+  $('flip').onclick = () => { state.facing = state.facing === 'user' ? 'environment' : 'user'; savePrefs(); startCamera(); };
+  $('thumb').onclick = openGallery;
+  $('btnCloseGallery').onclick = () => { $('gallery').hidden = true; revokeAll(); };
+  $('btnCloseViewer').onclick = () => { $('viewer').hidden = true; };
+  $('btnGrid').onclick = () => { state.grid = !state.grid; applyUI(); savePrefs(); };
+  $('btnTimer').onclick = () => { state.timer = TIMERS[(TIMERS.indexOf(state.timer) + 1) % TIMERS.length]; applyUI(); savePrefs(); };
+  $('btnRes').onclick = () => { state.hiRes = !state.hiRes; savePrefs(); startCamera(); toast(state.hiRes ? 'Resolução máxima' : 'Resolução HD (mais leve)'); };
+  $('btnTorch').onclick = async () => {
+    state.torch = !state.torch;
+    try { await state.track.applyConstraints({ advanced: [{ torch: state.torch }] }); } catch { state.torch = false; }
+    $('btnTorch').setAttribute('aria-pressed', String(state.torch));
+  };
+  // Botões de volume (alguns Androids) e barra de espaço
+  document.addEventListener('keydown', e => { if ($('gallery').hidden && (e.code === 'Space' || e.key === 'AudioVolumeUp' || e.key === 'AudioVolumeDown')) { e.preventDefault(); capture(); } });
+  // Libera a câmera ao sair do app e retoma ao voltar
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stopCamera(); else if ($('gate').hidden) startCamera(); });
+
+  function applyUI() {
+    $('grid').hidden = !state.grid; $('btnGrid').setAttribute('aria-pressed', String(state.grid));
+    $('timerLabel').textContent = state.timer + 's'; $('btnTimer').setAttribute('aria-pressed', String(!!state.timer));
+  }
+  let tt; function toast(msg) { const t = $('toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(tt); tt = setTimeout(() => t.classList.remove('on'), 1800); }
+
+  // ---------- Início ----------
+  applyUI(); refreshThumb();
+  if (!navigator.mediaDevices?.getUserMedia) showGate(new Error('Navegador sem suporte a câmera'));
+  else if (!window.isSecureContext) showGate(new Error('insecure'));
+  else navigator.permissions?.query({ name: 'camera' }).then(p => { if (p.state === 'granted') startCamera(); }).catch(() => {});
+})();
+</script>
+</body>
+</html>
