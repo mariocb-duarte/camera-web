@@ -324,7 +324,7 @@ video.mirror{transform:scaleX(-1)}
       if (auto.on && d._t) {
         const st = d._t.status;
         if (st === 'known' || st === 'done') { color = GREEN; label = '✓ já fotografado'; }
-        else if (st === 'pending') { color = '#eef1ee'; label = 'identificando…'; }
+        else if (st === 'pending') { color = '#eef1ee'; label = faceapi ? 'identificando…' : 'carregando modelo…'; }
         else if (st === 'shooting') { color = RED; label = 'fotografando'; }
         else { label = 'nova pessoa'; }
       }
@@ -366,7 +366,9 @@ video.mirror{transform:scaleX(-1)}
   // ---------- Disparo automático: uma sequência por pessoa nova ----------
   const BURST = 5;          // fotos por pessoa
   const BURST_GAP = 180;    // ms entre fotos da sequência
-  const STABLE_MS = 700;    // rosto precisa ficar parado por esse tempo antes de identificar/refotografar
+  const IDENTIFY_MS = 250;  // rosto visto por esse tempo já pode ser identificado
+  const STILL_MS = 400;     // pessoa nova precisa estar parada por esse tempo para fotografar
+  const STABLE_MS = 700;    // tempo parado na nova posição antes de refotografar
   const MATCH_DIST = 0.55;  // distância máxima para considerar "mesma pessoa" (menor = mais rígido)
   const MOVE_DIST = 0.12;   // deslocamento (fração da largura do quadro) que conta como "mudou de posição"
   const MOVE_SCALE = 1.4;   // aproximou/afastou: rosto ficou 40% maior ou menor
@@ -389,21 +391,44 @@ video.mirror{transform:scaleX(-1)}
         fa.nets.faceLandmark68Net.loadFromUri(FA + '/model'),
         fa.nets.faceRecognitionNet.loadFromUri(FA + '/model'),
       ]);
+      // Aquecimento: a 1ª execução na GPU compila os shaders; faz isso antes de aparecer alguém
+      try {
+        const blank = document.createElement('canvas'); blank.width = blank.height = 150;
+        blank.getContext('2d').fillRect(0, 0, 150, 150);
+        await fa.nets.faceLandmark68Net.detectLandmarks(blank);
+        await fa.computeFaceDescriptor(blank);
+      } catch {}
       return fa;
     })();
     try { faceapi = await faLoading; } catch (e) { faLoading = null; throw e; }
     return faceapi;
   }
 
-  async function describe(box) {
-    const fa = await loadFaceApi();
-    const vw = video.videoWidth, vh = video.videoHeight, m = 0.35;
-    const x = Math.max(0, box.originX - box.width * m), y = Math.max(0, box.originY - box.height * m);
-    const w = Math.min(vw - x, box.width * (1 + 2 * m)), h = Math.min(vh - y, box.height * (1 + 2 * m));
+  // Recorta o rosto já encontrado pelo MediaPipe (sem rodar outro detector)
+  function cropFace(box, size, m) {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const side = Math.max(box.width, box.height) * (1 + 2 * m);
+    const cx = box.originX + box.width / 2, cy = box.originY + box.height / 2;
+    const x = Math.max(0, cx - side / 2), y = Math.max(0, cy - side / 2);
+    const w = Math.min(vw - x, side), h = Math.min(vh - y, side);
     if (w < 8 || h < 8) return null;
-    const sc = 320 / Math.max(w, h);
+    const sc = size / Math.max(w, h);
     const c = document.createElement('canvas'); c.width = Math.round(w * sc); c.height = Math.round(h * sc);
     c.getContext('2d').drawImage(video, x, y, w, h, 0, 0, c.width, c.height);
+    return c;
+  }
+  async function describe(box) {
+    const fa = await loadFaceApi();
+    // Caminho rápido: pontos do rosto direto no recorte -> alinha -> assinatura
+    try {
+      const c = cropFace(box, 192, 0.22); if (!c) return null;
+      const lm = await fa.nets.faceLandmark68Net.detectLandmarks(c);
+      const [aligned] = await fa.extractFaces(c, [lm.align()]);
+      const d = await fa.computeFaceDescriptor(aligned);
+      if (d && d.length === 128) return d;
+    } catch {}
+    // Caminho completo (mais lento), caso o rápido falhe
+    const c = cropFace(box, 320, 0.35); if (!c) return null;
     const r = await fa.detectSingleFace(c, new fa.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.3 })).withFaceLandmarks().withFaceDescriptor();
     return r?.descriptor || null;
   }
@@ -445,12 +470,12 @@ video.mirror{transform:scaleX(-1)}
     const now = performance.now();
     const visible = tracks.filter(t => now - t.lastSeen < 300);
     if (!describing) {
-      const t = visible.find(t => t.status === 'pending' && now - t.firstSeen > STABLE_MS);
+      const t = visible.find(t => t.status === 'pending' && now - t.firstSeen > IDENTIFY_MS);
       if (t) identify(t);
     }
     if (state.busy) return;
     // 1) Pessoas novas primeiro
-    const fresh = visible.filter(t => t.status === 'new');
+    const fresh = visible.filter(t => t.status === 'new' && now - t.stillSince > STILL_MS);
     if (fresh.length) return burst(fresh);
     // 2) Todos na cena já fotografados: refaz quem mudou de posição, a partir do primeiro fotografado
     if (!visible.length || visible.some(t => t.status === 'pending')) return;
