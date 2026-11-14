@@ -31,14 +31,18 @@
 <video id="video" playsinline muted></video>
 <div id="bar">
   <b>Bateria no ar<span>.</span></b>
+  <button id="btnCal">Recalibrar</button>
   <button id="btnFlip">Trocar câmera</button>
-  <label>Sensibilidade <input id="sens" type="range" min="0.6" max="2.2" step="0.1" value="1.4"></label>
+  <label>Sensibilidade <input id="sens" type="range" min="1.5" max="5" step="0.1" value="3.2"></label>
+  <label><input id="lefty" type="checkbox"> Canhoto</label>
   <div id="status"></div>
 </div>
 <div id="start">
   <h2>Bateria no ar<span>.</span></h2>
-  <p>Apoie o celular deitado (na horizontal) a uns 1,5 m de você, com a câmera frontal virada para você.
-     Faça o movimento de bater com as mãos sobre cada peça que aparece na tela: o som sai no fundo do golpe.</p>
+  <p>Apoie o celular <b>deitado</b>, na altura do peito, a uns <b>2 metros</b> à sua frente — no lugar onde ficaria o bumbo.
+     Sente-se como no banco da bateria, de modo que a cabeça e os joelhos apareçam.</p>
+  <p>A bateria é montada em volta do seu corpo, nas posições de um kit real, e fica fixa onde você calibrou.
+     Toque com as mãos como se segurasse as baquetas; o bumbo sai pelo movimento do joelho do pé do pedal.</p>
   <button id="btnStart">Ligar câmera e tocar</button>
   <div class="err"></div>
 </div>
@@ -136,75 +140,74 @@ function click(t, accent){
   o.connect(g).connect(master); o.start(t); o.stop(t + 0.08);
 }
 
-/* ---------- Peças (zonas na tela, em frações da tela) ---------- */
-// x,y = centro (fração da largura/altura) · r = raio em fração da menor dimensão
-const ZONES = [
-  {id:'crash',    nome:'Ataque',   x:.20, y:.22, r:.17, cym:true},
-  {id:'ride',     nome:'Condução', x:.80, y:.24, r:.18, cym:true},
-  {id:'hhClosed', nome:'Chimbal',  x:.10, y:.52, r:.14, cym:true},
-  {id:'tom1',     nome:'Tom 1',    x:.40, y:.38, r:.12},
-  {id:'tom2',     nome:'Tom 2',    x:.60, y:.38, r:.13},
-  {id:'snare',    nome:'Caixa',    x:.28, y:.72, r:.15},
-  {id:'floor',    nome:'Surdo',    x:.73, y:.72, r:.17},
-  {id:'kick',     nome:'Bumbo',    x:.50, y:.85, r:.14},
+/* =========================================================================
+   Bateria no ar — posições reais, relativas ao corpo do baterista
+   Unidade = largura dos ombros (≈ 40 cm). Origem = meio dos ombros.
+   u: + para a DIREITA do baterista · v: + para BAIXO
+   ========================================================================= */
+const KIT = [
+  {id:'crash',    nome:'Ataque',   u:-0.95, v:-0.15, r:0.42, cym:true},
+  {id:'ride',     nome:'Condução', u: 1.10, v: 0.20, r:0.46, cym:true},
+  {id:'hhClosed', nome:'Chimbal',  u:-0.95, v: 0.72, r:0.34, cym:true},
+  {id:'tom1',     nome:'Tom 1',    u:-0.22, v: 0.52, r:0.24},
+  {id:'tom2',     nome:'Tom 2',    u: 0.32, v: 0.52, r:0.26},
+  {id:'snare',    nome:'Caixa',    u:-0.35, v: 1.05, r:0.33},
+  {id:'floor',    nome:'Surdo',    u: 0.85, v: 1.05, r:0.38},
 ];
 const SOUNDS = {crash, ride, hhClosed, hhOpen, snare, tom1:tom(220), tom2:tom(165), floor:tom(105), kick};
 
 /* ---------- Tela ---------- */
 const cv = document.getElementById('cv'), g2 = cv.getContext('2d');
-let W = 0, H = 0, DPR = 1;
+let W = 0, H = 0;
 function resize(){
-  DPR = Math.min(2, devicePixelRatio || 1);
-  W = innerWidth; H = innerHeight;
-  cv.width = W * DPR; cv.height = H * DPR;
-  g2.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const dpr = Math.min(2, devicePixelRatio || 1);
+  W = innerWidth; H = innerHeight; cv.width = W * dpr; cv.height = H * dpr;
+  g2.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
-addEventListener('resize', resize); resize();
+addEventListener('resize', () => { resize(); if (body) recalibrate(); }); resize();
+
+/* ---------- Estado ---------- */
+const video = document.getElementById('video');
+const statusEl = document.getElementById('status');
+const sens = document.getElementById('sens');
+const leftyEl = document.getElementById('lefty');
+let landmarker = null, facing = 'user', stream = null, lastVideoTime = -1, running = false;
+let body = null;              // {sx, sy, sw} travado após calibrar
+let calib = null;             // amostras durante a calibração
+const flashes = {};
+
+function side(){ return (facing === 'user' ? 1 : -1) * (leftyEl.checked ? -1 : 1); }
 function zoneGeom(z){
-  const m = Math.min(W, H);
-  return {cx:z.x * W, cy:z.y * H, rx:z.r * m, ry:z.r * m * (z.cym ? .45 : .7)};
+  const s = body.sw;
+  return {cx: body.sx + z.u * s * side(), cy: body.sy + z.v * s,
+          rx: z.r * s, ry: z.r * s * (z.cym ? .38 : .55)};
 }
 function nearestZone(px, py){
   let best = null, bd = 1e9;
-  for (const z of ZONES){
+  for (const z of KIT){
     const q = zoneGeom(z), d = Math.hypot((px - q.cx) / q.rx, (py - q.cy) / q.ry);
     if (d < bd){ bd = d; best = z; }
   }
-  return bd < 1.6 ? best : null;   // tolerância: um pouco fora da borda ainda conta
+  return bd < 1.5 ? best : null;
 }
-
-/* ---------- Tocar ---------- */
-const flashes = {};
 function play(id, v){
   initAudio();
   SOUNDS[id](ctx.currentTime, Math.max(.35, Math.min(1, v)));
   flashes[id] = performance.now();
 }
-// toque na tela também funciona (útil para testar sem câmera)
-cv.addEventListener('pointerdown', e => {
-  const z = nearestZone(e.clientX, e.clientY);
-  if (z) play(z.id, .9);
-});
 
-/* ---------- Câmera + MediaPipe ---------- */
-const video = document.getElementById('video');
-const statusEl = document.getElementById('status');
-const sens = document.getElementById('sens');
-let landmarker = null, facing = 'user', stream = null, lastVideoTime = -1, running = false;
-
+/* ---------- Câmera + MediaPipe Pose ---------- */
 async function loadModel(){
-  statusEl.textContent = 'carregando detector de mãos…';
-  const {FilesetResolver, HandLandmarker} = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
-  const files = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
-  const opts = (delegate) => ({
-    baseOptions:{
-      modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-      delegate},
-    runningMode:'VIDEO', numHands:2,
-    minHandDetectionConfidence:.5, minHandPresenceConfidence:.5, minTrackingConfidence:.5,
-  });
-  try { landmarker = await HandLandmarker.createFromOptions(files, opts('GPU')); }
-  catch { landmarker = await HandLandmarker.createFromOptions(files, opts('CPU')); }
+  statusEl.textContent = 'carregando detector…';
+  const V = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+  const {FilesetResolver, PoseLandmarker} = await import(V + '/vision_bundle.mjs');
+  const files = await FilesetResolver.forVisionTasks(V + '/wasm');
+  const opts = d => ({
+    baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task', delegate:d},
+    runningMode:'VIDEO', numPoses:1,
+    minPoseDetectionConfidence:.5, minPosePresenceConfidence:.5, minTrackingConfidence:.5});
+  try { landmarker = await PoseLandmarker.createFromOptions(files, opts('GPU')); }
+  catch { landmarker = await PoseLandmarker.createFromOptions(files, opts('CPU')); }
 }
 async function startCamera(){
   if (stream) stream.getTracks().forEach(t => t.stop());
@@ -212,108 +215,161 @@ async function startCamera(){
     video:{facingMode:facing, width:{ideal:640}, height:{ideal:480}, frameRate:{ideal:60}}, audio:false});
   video.srcObject = stream; await video.play();
 }
+function recalibrate(){ body = null; calib = {n:0, sx:0, sy:0, sw:0, start:performance.now()}; }
 document.getElementById('btnStart').onclick = async () => {
   initAudio();
   const ov = document.getElementById('start');
   try{
-    await startCamera();
-    ov.style.display = 'none';
+    await startCamera(); ov.style.display = 'none';
     if (!landmarker) await loadModel();
-    statusEl.textContent = 'pronto · bata no ar sobre as peças';
-    running = true;
+    running = true; recalibrate();
   } catch(err){
     ov.querySelector('.err').textContent = 'Não foi possível abrir a câmera: ' + (err.message || err) +
-      '. A página precisa estar em HTTPS (ex.: GitHub Pages) e com permissão de câmera.';
+      '. A página precisa estar em HTTPS e com permissão de câmera.';
   }
 };
+document.getElementById('btnCal').onclick = recalibrate;
 document.getElementById('btnFlip').onclick = async () => {
   facing = facing === 'user' ? 'environment' : 'user';
-  try { await startCamera(); } catch {}
+  try { await startCamera(); recalibrate(); } catch {}
 };
 
-/* ---------- Detecção da batida ----------
-   Para cada mão acompanhamos o centro dos nós dos dedos.
-   Batida = mão descendo rápido e depois freando de repente (o "fundo" do golpe).
-   A peça tocada é a que estiver sob a mão nesse instante; a força vem da velocidade. */
-const hands = {};   // por lateralidade: Left / Right
-function coverRect(){
-  const vw = video.videoWidth, vh = video.videoHeight;
-  const s = Math.max(W / vw, H / vh);
-  return {x:(W - vw * s) / 2, y:(H - vh * s) / 2, w:vw * s, h:vh * s};
-}
-function toScreen(lm, R){
-  const mirror = facing === 'user';
-  return {x: R.x + (mirror ? 1 - lm.x : lm.x) * R.w, y: R.y + lm.y * R.h};
-}
-function track(label, p, t){
-  let s = hands[label];
-  if (!s || t - s.t > 250){ hands[label] = {x:p.x, y:p.y, t, vy:0, armed:false, peak:0, last:0, trail:[]}; return; }
+/* ---------- Detecção do golpe ----------
+   Golpe = ponta da baqueta descendo rápido e freando de repente (fundo do golpe).
+   Velocidade medida em "larguras de ombro por segundo", então não depende da distância. */
+const trk = {};
+function track(key, p, t, thrMul, onHit){
+  let s = trk[key];
+  if (!s || t - s.t > 250){ trk[key] = {x:p.x, y:p.y, t, vy:0, armed:false, peak:0, last:0, trail:[]}; return; }
   const dt = (t - s.t) / 1000; if (dt <= 0) return;
-  const raw = (p.y - s.y) / dt / H;              // alturas de tela por segundo (+ = descendo)
-  s.vy = .6 * raw + .4 * s.vy;
+  const raw = (p.y - s.y) / dt / body.sw;
+  s.vy = .65 * raw + .35 * s.vy;
   s.x = p.x; s.y = p.y; s.t = t;
-  s.trail.push({x:p.x, y:p.y, t}); if (s.trail.length > 8) s.trail.shift();
-  const thr = 2.6 - +sens.value;                 // limiar de velocidade
+  s.trail.push({x:p.x, y:p.y}); if (s.trail.length > 7) s.trail.shift();
+  const thr = (6.2 - +sens.value) * thrMul;
   if (s.vy > thr){ s.armed = true; s.peak = Math.max(s.peak, s.vy); }
   else if (s.armed && s.vy < thr * .3){
-    if (t - s.last > 90){
-      const z = nearestZone(p.x, p.y);
-      if (z) play(z.id, .4 + (s.peak - thr) / (thr * 2.5));
-      s.last = t;
-    }
-    s.armed = false; s.peak = 0;
+    if (t - s.last > 80) onHit(p, .45 + (s.peak - thr) / (thr * 2.2));
+    s.last = t; s.armed = false; s.peak = 0;
   }
 }
+const vis = l => (l.visibility ?? 1) > .5;
 
 /* ---------- Loop ---------- */
+let pose = null, R = null;
+function coverRect(){
+  const vw = video.videoWidth, vh = video.videoHeight, s = Math.max(W / vw, H / vh);
+  return {x:(W - vw * s) / 2, y:(H - vh * s) / 2, w:vw * s, h:vh * s};
+}
+function P(i){
+  const l = pose[i]; if (!l) return null;
+  return {x: R.x + (facing === 'user' ? 1 - l.x : l.x) * R.w, y: R.y + l.y * R.h, ok: vis(l)};
+}
+function stickTip(w, idx){        // baqueta virtual: prolonga punho → dedo
+  const dx = idx.x - w.x, dy = idx.y - w.y, len = Math.hypot(dx, dy) || 1;
+  const L = body ? body.sw * .55 : 60;
+  return {x: w.x + dx / len * L, y: w.y + dy / len * L};
+}
+
+function process(now){
+  // pose: 11/12 ombros · 15/16 punhos · 19/20 dedos · 25/26 joelhos (esq/dir do baterista)
+  const ls = P(11), rs = P(12);
+  if (!ls || !ls.ok || !rs.ok) return;
+  if (calib){
+    const sw = Math.hypot(ls.x - rs.x, ls.y - rs.y);
+    if (sw < 20) return;
+    calib.n++; calib.sx += (ls.x + rs.x) / 2; calib.sy += (ls.y + rs.y) / 2; calib.sw += sw;
+    if (now - calib.start > 2500 && calib.n > 20){
+      body = {sx:calib.sx / calib.n, sy:calib.sy / calib.n, sw:calib.sw / calib.n};
+      calib = null;
+    }
+    return;
+  }
+  if (!body) return;
+  for (const [w, i, key] of [[15, 19, 'L'], [16, 20, 'R']]){
+    const pw = P(w), pi = P(i);
+    if (!pw || !pi || !pw.ok) continue;
+    const tip = stickTip(pw, pi);
+    trk[key + 'w'] = pw;
+    track(key, tip, now, 1, (p, v) => { const z = nearestZone(p.x, p.y); if (z) play(z.id, v); });
+  }
+  const knee = P(leftyEl.checked ? 25 : 26);    // pé do bumbo
+  kneeOk = !!(knee && knee.ok);
+  if (kneeOk) track('K', knee, now, .45, (p, v) => play('kick', v));
+}
+let kneeOk = false;
+
 function drawZone(z, now){
   const q = zoneGeom(z), f = flashes[z.id], a = f ? Math.max(0, 1 - (now - f) / 220) : 0;
-  g2.save();
   g2.beginPath(); g2.ellipse(q.cx, q.cy, q.rx, q.ry, 0, 0, Math.PI * 2);
   if (z.cym){
     const gr = g2.createRadialGradient(q.cx, q.cy, 0, q.cx, q.cy, q.rx);
-    gr.addColorStop(0, `rgba(255,225,140,${.35 + a * .5})`); gr.addColorStop(1, `rgba(180,130,40,${.25 + a * .5})`);
+    gr.addColorStop(0, `rgba(255,225,140,${.30 + a * .55})`); gr.addColorStop(1, `rgba(180,130,40,${.22 + a * .55})`);
     g2.fillStyle = gr;
-  } else g2.fillStyle = `rgba(245,240,230,${.18 + a * .55})`;
+  } else g2.fillStyle = `rgba(245,240,230,${.16 + a * .55})`;
   g2.fill();
-  g2.lineWidth = 4; g2.strokeStyle = a ? `rgba(255,110,70,${.6 + a * .4})` : (z.cym ? 'rgba(240,200,110,.8)' : 'rgba(220,225,235,.85)');
+  g2.lineWidth = 3; g2.strokeStyle = a ? '#ff6a46' : (z.cym ? 'rgba(240,200,110,.85)' : 'rgba(225,228,236,.85)');
   g2.stroke();
-  g2.fillStyle = 'rgba(255,255,255,.9)'; g2.font = `600 ${Math.max(11, Math.min(W, H) * .032)}px system-ui`;
+  g2.fillStyle = '#fff'; g2.font = `600 ${Math.max(11, body.sw * .12)}px system-ui`;
   g2.textAlign = 'center'; g2.textBaseline = 'middle'; g2.fillText(z.nome, q.cx, q.cy);
-  g2.restore();
+}
+function drawGuide(now){
+  // silhueta-guia durante a calibração
+  const cx = W / 2, top = H * .12, s = Math.min(W, H) * .32;
+  g2.strokeStyle = 'rgba(255,255,255,.5)'; g2.lineWidth = 3; g2.setLineDash([8, 8]);
+  g2.beginPath(); g2.arc(cx, top + s * .25, s * .2, 0, Math.PI * 2); g2.stroke();
+  g2.beginPath(); g2.moveTo(cx - s * .5, top + s * .6); g2.lineTo(cx + s * .5, top + s * .6);
+  g2.lineTo(cx + s * .4, top + s * 1.6); g2.lineTo(cx - s * .4, top + s * 1.6); g2.closePath(); g2.stroke();
+  g2.setLineDash([]);
+  g2.fillStyle = '#fff'; g2.textAlign = 'center'; g2.font = '600 16px system-ui';
+  const msg = !landmarker ? 'Carregando detector…'
+    : calib && calib.n ? 'Fique parado na posição de tocar… ' + Math.max(0, Math.ceil((2500 - (now - calib.start)) / 1000)) + 's'
+    : 'Sente-se como na bateria, com a cabeça e os joelhos aparecendo';
+  g2.fillText(msg, cx, H - 28);
 }
 function loop(){
   requestAnimationFrame(loop);
   const now = performance.now();
   g2.clearRect(0, 0, W, H);
-  if (video.readyState >= 2){
-    const R = coverRect();
-    g2.save();
-    if (facing === 'user'){ g2.translate(W, 0); g2.scale(-1, 1); g2.drawImage(video, W - R.x - R.w, R.y, R.w, R.h); }
-    else g2.drawImage(video, R.x, R.y, R.w, R.h);
-    g2.restore();
-    g2.fillStyle = 'rgba(8,8,12,.35)'; g2.fillRect(0, 0, W, H);
+  if (video.readyState < 2) return;
+  R = coverRect();
+  g2.save();
+  if (facing === 'user'){ g2.translate(W, 0); g2.scale(-1, 1); g2.drawImage(video, W - R.x - R.w, R.y, R.w, R.h); }
+  else g2.drawImage(video, R.x, R.y, R.w, R.h);
+  g2.restore();
+  g2.fillStyle = 'rgba(8,8,12,.4)'; g2.fillRect(0, 0, W, H);
 
-    if (running && landmarker && video.currentTime !== lastVideoTime){
-      lastVideoTime = video.currentTime;
-      const res = landmarker.detectForVideo(video, now);
-      (res.landmarks || []).forEach((lms, i) => {
-        let label = res.handednesses?.[i]?.[0]?.categoryName || ('h' + i);
-        const k = [5, 9, 13, 17].map(j => lms[j]);
-        const c = {x:k.reduce((a, b) => a + b.x, 0) / 4, y:k.reduce((a, b) => a + b.y, 0) / 4};
-        track(label, toScreen(c, R), now);
-      });
-    }
+  if (running && landmarker && video.currentTime !== lastVideoTime){
+    lastVideoTime = video.currentTime;
+    const res = landmarker.detectForVideo(video, now);
+    pose = res.landmarks?.[0] || null;
+    if (pose) process(now);
   }
-  for (const z of ZONES) drawZone(z, now);
-  for (const s of Object.values(hands)){           // "ponta da baqueta" com rastro
-    if (now - s.t > 250) continue;
+  if (!body){ drawGuide(now); statusEl.textContent = 'calibrando'; return; }
+  statusEl.textContent = kneeOk ? 'bumbo: joelho ' + (leftyEl.checked ? 'esquerdo' : 'direito') : 'joelho fora do quadro: bumbo desligado';
+
+  for (const z of KIT) drawZone(z, now);
+
+  // bumbo (indicador junto ao joelho)
+  const fk = flashes.kick, ak = fk ? Math.max(0, 1 - (now - fk) / 220) : 0;
+  const kx = body.sx + .25 * body.sw * side(), ky = body.sy + 1.75 * body.sw;
+  g2.beginPath(); g2.arc(kx, Math.min(ky, H - 30), body.sw * .22, 0, Math.PI * 2);
+  g2.fillStyle = `rgba(150,30,20,${.35 + ak * .6})`; g2.fill();
+  g2.strokeStyle = kneeOk ? 'rgba(255,255,255,.7)' : 'rgba(255,255,255,.25)'; g2.lineWidth = 3; g2.stroke();
+  g2.fillStyle = '#fff'; g2.font = '600 12px system-ui'; g2.fillText('Bumbo', kx, Math.min(ky, H - 30));
+
+  // baquetas virtuais
+  for (const key of ['L', 'R']){
+    const s = trk[key], w = trk[key + 'w'];
+    if (!s || !w || now - s.t > 250) continue;
+    g2.strokeStyle = '#e8d3a8'; g2.lineWidth = 6; g2.lineCap = 'round';
+    g2.beginPath(); g2.moveTo(w.x, w.y); g2.lineTo(s.x, s.y); g2.stroke();
     s.trail.forEach((p, i) => {
-      g2.beginPath(); g2.arc(p.x, p.y, 4 + i * 1.5, 0, Math.PI * 2);
-      g2.fillStyle = `rgba(255,90,60,${(i + 1) / s.trail.length * .6})`; g2.fill();
+      g2.beginPath(); g2.arc(p.x, p.y, 3 + i, 0, Math.PI * 2);
+      g2.fillStyle = `rgba(255,90,60,${(i + 1) / s.trail.length * .5})`; g2.fill();
     });
-    g2.beginPath(); g2.arc(s.x, s.y, 16, 0, Math.PI * 2);
-    g2.fillStyle = s.armed ? '#ff5a3c' : 'rgba(255,255,255,.9)'; g2.fill();
+    g2.beginPath(); g2.arc(s.x, s.y, 9, 0, Math.PI * 2);
+    g2.fillStyle = s.armed ? '#ff5a3c' : '#fff'; g2.fill();
   }
 }
 loop();
