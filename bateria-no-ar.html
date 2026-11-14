@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Bateria no Ar</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:#0b0b0e;color:#eee;overflow:hidden;
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;user-select:none;touch-action:none}
+  #cv{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #video{position:fixed;width:1px;height:1px;opacity:0;pointer-events:none}
+  #bar{position:fixed;top:0;left:0;right:0;display:flex;align-items:center;gap:8px;padding:6px 10px;
+    background:linear-gradient(#000a,#0000);z-index:2;font-size:12px;flex-wrap:wrap}
+  #bar b{font-size:14px} #bar b span{color:#ff5a3c}
+  button{background:#232633cc;color:#eee;border:1px solid #3a3e4c;border-radius:9px;padding:6px 10px;
+    font-size:12px;font-weight:600;touch-action:manipulation}
+  label{display:flex;align-items:center;gap:5px;color:#bbb}
+  input[type=range]{width:90px;accent-color:#ff5a3c}
+  #status{margin-left:auto;color:#aaa}
+  #start{position:fixed;inset:0;z-index:3;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:14px;padding:24px;text-align:center;background:radial-gradient(#1d1b24,#0b0b0e)}
+  #start h2{margin:0;font-size:24px} #start h2 span{color:#ff5a3c}
+  #start p{margin:0;max-width:460px;color:#b8bbc6;font-size:14px;line-height:1.5}
+  #start button{font-size:16px;padding:12px 22px;background:#ff5a3c;border-color:#ff5a3c;color:#fff}
+  .err{color:#ff8a70;font-size:13px;max-width:460px}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<video id="video" playsinline muted></video>
+<div id="bar">
+  <b>Bateria no ar<span>.</span></b>
+  <button id="btnFlip">Trocar câmera</button>
+  <label>Sensibilidade <input id="sens" type="range" min="0.6" max="2.2" step="0.1" value="1.4"></label>
+  <div id="status"></div>
+</div>
+<div id="start">
+  <h2>Bateria no ar<span>.</span></h2>
+  <p>Apoie o celular deitado (na horizontal) a uns 1,5 m de você, com a câmera frontal virada para você.
+     Faça o movimento de bater com as mãos sobre cada peça que aparece na tela: o som sai no fundo do golpe.</p>
+  <button id="btnStart">Ligar câmera e tocar</button>
+  <div class="err"></div>
+</div>
+<script>
+
+/* ---------- Áudio (sons sintetizados com Web Audio) ---------- */
+let ctx, master, noiseBuf;
+function initAudio(){
+  if (ctx) { if (ctx.state === 'suspended') ctx.resume(); return; }
+  ctx = new (window.AudioContext || window.webkitAudioContext)({latencyHint:'interactive'});
+  const comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -10; comp.ratio.value = 4;
+  master = ctx.createGain(); master.gain.value = 0.9;
+  master.connect(comp); comp.connect(ctx.destination);
+  noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+}
+function env(g, t, peak, decay, attack = 0.002){
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(peak, t + attack);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + attack + decay);
+}
+function noise(t, dur){
+  const s = ctx.createBufferSource(); s.buffer = noiseBuf;
+  s.start(t, Math.random()); s.stop(t + dur + 0.05); return s;
+}
+function kick(t, v){
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.frequency.setValueAtTime(160, t);
+  o.frequency.exponentialRampToValueAtTime(42, t + 0.13);
+  env(g, t, 1.0 * v, 0.45);
+  o.connect(g).connect(master); o.start(t); o.stop(t + 0.6);
+  const n = noise(t, 0.02), f = ctx.createBiquadFilter(), ng = ctx.createGain();
+  f.type = 'lowpass'; f.frequency.value = 3000; env(ng, t, 0.25 * v, 0.015);
+  n.connect(f).connect(ng).connect(master);
+}
+function snare(t, v){
+  const n = noise(t, 0.25), hp = ctx.createBiquadFilter(), g = ctx.createGain();
+  hp.type = 'highpass'; hp.frequency.value = 1200; env(g, t, 0.7 * v, 0.2);
+  n.connect(hp).connect(g).connect(master);
+  const o = ctx.createOscillator(), og = ctx.createGain();
+  o.type = 'triangle'; o.frequency.setValueAtTime(240, t);
+  o.frequency.exponentialRampToValueAtTime(170, t + 0.08);
+  env(og, t, 0.55 * v, 0.1);
+  o.connect(og).connect(master); o.start(t); o.stop(t + 0.2);
+}
+function tom(freq){
+  return (t, v) => {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.frequency.setValueAtTime(freq * 1.6, t);
+    o.frequency.exponentialRampToValueAtTime(freq, t + 0.06);
+    env(g, t, 0.85 * v, 0.5);
+    o.connect(g).connect(master); o.start(t); o.stop(t + 0.6);
+    const n = noise(t, 0.05), f = ctx.createBiquadFilter(), ng = ctx.createGain();
+    f.type = 'bandpass'; f.frequency.value = freq * 4; env(ng, t, 0.15 * v, 0.04);
+    n.connect(f).connect(ng).connect(master);
+  };
+}
+// metal (estilo 808): 6 ondas quadradas em razões inarmônicas
+const RATIOS = [2, 3, 4.16, 5.43, 6.79, 8.21];
+function metal(t, v, decay, hpFreq, bpFreq, gainMul){
+  const g = ctx.createGain(), bp = ctx.createBiquadFilter(), hp = ctx.createBiquadFilter();
+  bp.type = 'bandpass'; bp.frequency.value = bpFreq;
+  hp.type = 'highpass'; hp.frequency.value = hpFreq;
+  RATIOS.forEach(r => {
+    const o = ctx.createOscillator(); o.type = 'square'; o.frequency.value = 40 * r;
+    o.connect(bp); o.start(t); o.stop(t + decay + 0.1);
+  });
+  env(g, t, gainMul * v, decay);
+  bp.connect(hp).connect(g).connect(master);
+  return g;
+}
+let openHat = null;
+function chokeOpen(t){
+  if (openHat){ openHat.gain.cancelScheduledValues(t); openHat.gain.setTargetAtTime(0.0001, t, 0.01); openHat = null; }
+}
+function hhClosed(t, v){ chokeOpen(t); metal(t, v, 0.05, 7000, 10000, 0.5); }
+function hhOpen(t, v){ chokeOpen(t); openHat = metal(t, v, 0.45, 7000, 10000, 0.4); }
+function crash(t, v){
+  metal(t, v, 1.6, 4500, 8000, 0.35);
+  const n = noise(t, 1.6), f = ctx.createBiquadFilter(), g = ctx.createGain();
+  f.type = 'highpass'; f.frequency.value = 5000; env(g, t, 0.35 * v, 1.5);
+  n.connect(f).connect(g).connect(master);
+}
+function ride(t, v){
+  metal(t, v, 1.1, 6000, 9000, 0.22);
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.frequency.value = 3200; env(g, t, 0.12 * v, 0.9);
+  o.connect(g).connect(master); o.start(t); o.stop(t + 1.1);
+}
+function click(t, accent){
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.frequency.value = accent ? 1800 : 1200; env(g, t, accent ? 0.5 : 0.3, 0.04);
+  o.connect(g).connect(master); o.start(t); o.stop(t + 0.08);
+}
+
+/* ---------- Peças (zonas na tela, em frações da tela) ---------- */
+// x,y = centro (fração da largura/altura) · r = raio em fração da menor dimensão
+const ZONES = [
+  {id:'crash',    nome:'Ataque',   x:.20, y:.22, r:.17, cym:true},
+  {id:'ride',     nome:'Condução', x:.80, y:.24, r:.18, cym:true},
+  {id:'hhClosed', nome:'Chimbal',  x:.10, y:.52, r:.14, cym:true},
+  {id:'tom1',     nome:'Tom 1',    x:.40, y:.38, r:.12},
+  {id:'tom2',     nome:'Tom 2',    x:.60, y:.38, r:.13},
+  {id:'snare',    nome:'Caixa',    x:.28, y:.72, r:.15},
+  {id:'floor',    nome:'Surdo',    x:.73, y:.72, r:.17},
+  {id:'kick',     nome:'Bumbo',    x:.50, y:.85, r:.14},
+];
+const SOUNDS = {crash, ride, hhClosed, hhOpen, snare, tom1:tom(220), tom2:tom(165), floor:tom(105), kick};
+
+/* ---------- Tela ---------- */
+const cv = document.getElementById('cv'), g2 = cv.getContext('2d');
+let W = 0, H = 0, DPR = 1;
+function resize(){
+  DPR = Math.min(2, devicePixelRatio || 1);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  g2.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+addEventListener('resize', resize); resize();
+function zoneGeom(z){
+  const m = Math.min(W, H);
+  return {cx:z.x * W, cy:z.y * H, rx:z.r * m, ry:z.r * m * (z.cym ? .45 : .7)};
+}
+function nearestZone(px, py){
+  let best = null, bd = 1e9;
+  for (const z of ZONES){
+    const q = zoneGeom(z), d = Math.hypot((px - q.cx) / q.rx, (py - q.cy) / q.ry);
+    if (d < bd){ bd = d; best = z; }
+  }
+  return bd < 1.6 ? best : null;   // tolerância: um pouco fora da borda ainda conta
+}
+
+/* ---------- Tocar ---------- */
+const flashes = {};
+function play(id, v){
+  initAudio();
+  SOUNDS[id](ctx.currentTime, Math.max(.35, Math.min(1, v)));
+  flashes[id] = performance.now();
+}
+// toque na tela também funciona (útil para testar sem câmera)
+cv.addEventListener('pointerdown', e => {
+  const z = nearestZone(e.clientX, e.clientY);
+  if (z) play(z.id, .9);
+});
+
+/* ---------- Câmera + MediaPipe ---------- */
+const video = document.getElementById('video');
+const statusEl = document.getElementById('status');
+const sens = document.getElementById('sens');
+let landmarker = null, facing = 'user', stream = null, lastVideoTime = -1, running = false;
+
+async function loadModel(){
+  statusEl.textContent = 'carregando detector de mãos…';
+  const {FilesetResolver, HandLandmarker} = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
+  const files = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+  const opts = (delegate) => ({
+    baseOptions:{
+      modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+      delegate},
+    runningMode:'VIDEO', numHands:2,
+    minHandDetectionConfidence:.5, minHandPresenceConfidence:.5, minTrackingConfidence:.5,
+  });
+  try { landmarker = await HandLandmarker.createFromOptions(files, opts('GPU')); }
+  catch { landmarker = await HandLandmarker.createFromOptions(files, opts('CPU')); }
+}
+async function startCamera(){
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = await navigator.mediaDevices.getUserMedia({
+    video:{facingMode:facing, width:{ideal:640}, height:{ideal:480}, frameRate:{ideal:60}}, audio:false});
+  video.srcObject = stream; await video.play();
+}
+document.getElementById('btnStart').onclick = async () => {
+  initAudio();
+  const ov = document.getElementById('start');
+  try{
+    await startCamera();
+    ov.style.display = 'none';
+    if (!landmarker) await loadModel();
+    statusEl.textContent = 'pronto · bata no ar sobre as peças';
+    running = true;
+  } catch(err){
+    ov.querySelector('.err').textContent = 'Não foi possível abrir a câmera: ' + (err.message || err) +
+      '. A página precisa estar em HTTPS (ex.: GitHub Pages) e com permissão de câmera.';
+  }
+};
+document.getElementById('btnFlip').onclick = async () => {
+  facing = facing === 'user' ? 'environment' : 'user';
+  try { await startCamera(); } catch {}
+};
+
+/* ---------- Detecção da batida ----------
+   Para cada mão acompanhamos o centro dos nós dos dedos.
+   Batida = mão descendo rápido e depois freando de repente (o "fundo" do golpe).
+   A peça tocada é a que estiver sob a mão nesse instante; a força vem da velocidade. */
+const hands = {};   // por lateralidade: Left / Right
+function coverRect(){
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const s = Math.max(W / vw, H / vh);
+  return {x:(W - vw * s) / 2, y:(H - vh * s) / 2, w:vw * s, h:vh * s};
+}
+function toScreen(lm, R){
+  const mirror = facing === 'user';
+  return {x: R.x + (mirror ? 1 - lm.x : lm.x) * R.w, y: R.y + lm.y * R.h};
+}
+function track(label, p, t){
+  let s = hands[label];
+  if (!s || t - s.t > 250){ hands[label] = {x:p.x, y:p.y, t, vy:0, armed:false, peak:0, last:0, trail:[]}; return; }
+  const dt = (t - s.t) / 1000; if (dt <= 0) return;
+  const raw = (p.y - s.y) / dt / H;              // alturas de tela por segundo (+ = descendo)
+  s.vy = .6 * raw + .4 * s.vy;
+  s.x = p.x; s.y = p.y; s.t = t;
+  s.trail.push({x:p.x, y:p.y, t}); if (s.trail.length > 8) s.trail.shift();
+  const thr = 2.6 - +sens.value;                 // limiar de velocidade
+  if (s.vy > thr){ s.armed = true; s.peak = Math.max(s.peak, s.vy); }
+  else if (s.armed && s.vy < thr * .3){
+    if (t - s.last > 90){
+      const z = nearestZone(p.x, p.y);
+      if (z) play(z.id, .4 + (s.peak - thr) / (thr * 2.5));
+      s.last = t;
+    }
+    s.armed = false; s.peak = 0;
+  }
+}
+
+/* ---------- Loop ---------- */
+function drawZone(z, now){
+  const q = zoneGeom(z), f = flashes[z.id], a = f ? Math.max(0, 1 - (now - f) / 220) : 0;
+  g2.save();
+  g2.beginPath(); g2.ellipse(q.cx, q.cy, q.rx, q.ry, 0, 0, Math.PI * 2);
+  if (z.cym){
+    const gr = g2.createRadialGradient(q.cx, q.cy, 0, q.cx, q.cy, q.rx);
+    gr.addColorStop(0, `rgba(255,225,140,${.35 + a * .5})`); gr.addColorStop(1, `rgba(180,130,40,${.25 + a * .5})`);
+    g2.fillStyle = gr;
+  } else g2.fillStyle = `rgba(245,240,230,${.18 + a * .55})`;
+  g2.fill();
+  g2.lineWidth = 4; g2.strokeStyle = a ? `rgba(255,110,70,${.6 + a * .4})` : (z.cym ? 'rgba(240,200,110,.8)' : 'rgba(220,225,235,.85)');
+  g2.stroke();
+  g2.fillStyle = 'rgba(255,255,255,.9)'; g2.font = `600 ${Math.max(11, Math.min(W, H) * .032)}px system-ui`;
+  g2.textAlign = 'center'; g2.textBaseline = 'middle'; g2.fillText(z.nome, q.cx, q.cy);
+  g2.restore();
+}
+function loop(){
+  requestAnimationFrame(loop);
+  const now = performance.now();
+  g2.clearRect(0, 0, W, H);
+  if (video.readyState >= 2){
+    const R = coverRect();
+    g2.save();
+    if (facing === 'user'){ g2.translate(W, 0); g2.scale(-1, 1); g2.drawImage(video, W - R.x - R.w, R.y, R.w, R.h); }
+    else g2.drawImage(video, R.x, R.y, R.w, R.h);
+    g2.restore();
+    g2.fillStyle = 'rgba(8,8,12,.35)'; g2.fillRect(0, 0, W, H);
+
+    if (running && landmarker && video.currentTime !== lastVideoTime){
+      lastVideoTime = video.currentTime;
+      const res = landmarker.detectForVideo(video, now);
+      (res.landmarks || []).forEach((lms, i) => {
+        let label = res.handednesses?.[i]?.[0]?.categoryName || ('h' + i);
+        const k = [5, 9, 13, 17].map(j => lms[j]);
+        const c = {x:k.reduce((a, b) => a + b.x, 0) / 4, y:k.reduce((a, b) => a + b.y, 0) / 4};
+        track(label, toScreen(c, R), now);
+      });
+    }
+  }
+  for (const z of ZONES) drawZone(z, now);
+  for (const s of Object.values(hands)){           // "ponta da baqueta" com rastro
+    if (now - s.t > 250) continue;
+    s.trail.forEach((p, i) => {
+      g2.beginPath(); g2.arc(p.x, p.y, 4 + i * 1.5, 0, Math.PI * 2);
+      g2.fillStyle = `rgba(255,90,60,${(i + 1) / s.trail.length * .6})`; g2.fill();
+    });
+    g2.beginPath(); g2.arc(s.x, s.y, 16, 0, Math.PI * 2);
+    g2.fillStyle = s.armed ? '#ff5a3c' : 'rgba(255,255,255,.9)'; g2.fill();
+  }
+}
+loop();
+</script></body></html>
